@@ -87,7 +87,7 @@ main {
 .empty b { color: var(--ink); font-weight: 600; }
 
 .banner { display: flex; gap: 10px; align-items: flex-start; background: var(--danger-bg); border-radius: 10px; padding: 12px 12px 12px 14px; margin: 8px 0 14px; font-size: 14px; line-height: 1.6; }
-.banner p { margin: 0; flex: 1; min-width: 0; }
+.banner p { margin: 0; flex: 1; min-width: 0; white-space: pre-line; overflow-wrap: anywhere; }
 .banner button { color: var(--muted); font-size: 13px; padding: 2px 4px; flex: none; }
 
 ol.list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 16px; }
@@ -224,6 +224,7 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
       <button class="btn" id="btnExport">导出 .txt</button>
       <button class="btn" id="btnNew">新建笔记</button>
     </div>
+    <p class="hint" id="diag"></p>
     <p class="hint">「停顿多久算一句」：对方说话慢、句子被切碎时调长；想更快出译文时调短。<br>语音识别和翻译由 Google 完成，需要联网。笔记只保存在这台手机的浏览器里。</p>
   </div>
 </section>
@@ -441,10 +442,33 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     return t.slice(i).trim();
   }
 
+  const VERSION = 'v2';
+  let lastErr = '';
+  function browserName() {
+    const ua = navigator.userAgent;
+    const rules = [[/MicroMessenger/i, '微信内置浏览器'], [/\bLine\//, 'LINE 内置浏览器'], [/HeyTapBrowser|OppoBrowser|OnePlusBrowser|Coloros/i, 'OPPO/一加自带浏览器'],
+      [/EdgA?\//, 'Edge'], [/SamsungBrowser/, '三星浏览器'], [/MiuiBrowser|XiaoMi/i, '小米浏览器'], [/UCBrowser/i, 'UC 浏览器'], [/MQQBrowser|QQBrowser/i, 'QQ 浏览器'],
+      [/Quark/i, '夸克'], [/baiduboxapp|BaiduBrowser/i, '百度'], [/Firefox|FxiOS/, 'Firefox'], [/OPR\//, 'Opera'], [/; wv\)/, 'App 内置浏览器']];
+    for (const [re, n] of rules) if (re.test(ua)) return n;
+    if (navigator.brave) return 'Brave';
+    const m = ua.match(/Chrome\/(\d+)/);
+    if (m) return 'Chrome ' + m[1];
+    return /Safari\//.test(ua) ? 'Safari' : '未知浏览器';
+  }
+  const BROWSER = browserName();
+  const isChrome = /^Chrome /.test(BROWSER);
+  const errNames = { network: '连不上语音识别服务器', 'service-not-allowed': '语音服务不可用', 'not-allowed': '没有麦克风权限', 'audio-capture': '麦克风被占用', 'no-speech': '没听到声音' };
+  function diagLine() { return `（${VERSION} · 浏览器：${BROWSER}${lastErr ? ' · 错误：' + lastErr : ''}）`; }
+  function explainFailure() {
+    if (!isChrome) return `你现在用的是「${BROWSER}」，它的语音识别用不了。请复制下面的网址，用 Chrome 打开：\n${location.href.split('#')[0]}\n${diagLine()}`;
+    if (lastErr === 'network' || !lastErr) return 'Chrome 的语音识别连不上 Google 服务，所以一直被中断。请检查：\n① 手机里装了「Google」应用（Play 商店搜 Google），并更新到最新；\n② 系统设置里已开启谷歌基础服务（设置里搜「谷歌」或「Google」）；\n③ 当前网络能正常打开 google.com。\n' + diagLine();
+    return `语音识别一直启动失败（${errNames[lastErr] || lastErr}）。\n${diagLine()}`;
+  }
+
   function start() {
-    if (!SR) { showBanner('这个浏览器不能做语音识别。请用手机上的 Chrome 打开这个网址。'); return; }
+    if (!SR) { showBanner(isChrome ? '这个浏览器不能做语音识别。请把 Chrome 更新到最新版。' : `你现在用的是「${BROWSER}」，不能做语音识别。请复制网址，用 Chrome 打开。`); return; }
     if (!window.isSecureContext) { showBanner('需要用 https 开头的网址打开（例如 GitHub Pages），直接打开本地文件时用不了麦克风。'); return; }
-    want = true; quickEnds = 0; hideBanner();
+    want = true; quickEnds = 0; lastErr = ''; hideBanner();
     document.body.classList.add('rec');
     $('#btnRec').setAttribute('aria-label', '暂停');
     updateMeta(); updateLive();
@@ -474,7 +498,7 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     r.continuous = true;
     r.interimResults = true;
     r.maxAlternatives = 1;
-    const s = { done: new Set(), fin: '', interim: '', pending: null, liveFor: '' };
+    const s = { done: new Set(), fin: '', interim: '', pending: null, liveFor: '', heard: false };
     r.onresult = ev => { if (rec === r) onResult(ev, s); };
     r.onerror = ev => { if (rec === r) onError(ev); };
     r.onend = () => { if (rec === r) onEnd(s); };
@@ -483,6 +507,7 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     catch (e) { rec = null; restartT = setTimeout(spawn, 700); }
   }
   function onResult(ev, s) {
+    s.heard = true; quickEnds = 0; lastErr = ''; setNet(false);
     let interim = '';
     for (let i = ev.resultIndex; i < ev.results.length; i++) {
       const res = ev.results[i];
@@ -555,12 +580,14 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     rec = null;
     if (!want) { updateMeta(); updateLive(); return; }
     if (document.hidden) return; // resumes when the page is visible again
-    quickEnds = (Date.now() - startedAt < 1500) ? quickEnds + 1 : 0;
-    if (quickEnds === 6) toast('识别一直被中断，检查一下网络');
-    restartT = setTimeout(spawn, quickEnds > 4 ? 2000 : 120);
+    // a session that ends within 1.5 s without hearing anything is a failed start
+    quickEnds = (!s.heard && Date.now() - startedAt < 1500) ? quickEnds + 1 : 0;
+    if (quickEnds >= 4) { stop(); showBanner(explainFailure()); return; }
+    restartT = setTimeout(spawn, quickEnds > 1 ? 1000 : 120);
   }
   function onError(ev) {
     const c = ev.error;
+    if (c !== 'aborted') lastErr = c;
     if (c === 'no-speech' || c === 'aborted' || document.hidden) return;
     if (c === 'network') { setNet(true); return; }
     const msg = {
@@ -569,7 +596,7 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
       'audio-capture': '麦克风被别的应用占用了（比如正在通话或录音），关掉之后再点 ✎。',
       'language-not-supported': '当前的语音识别服务不支持这个语言。请安装或更新「Google」应用后再试。'
     }[c];
-    if (msg) { stop(); showBanner(msg); return; }
+    if (msg) { stop(); showBanner(msg + '\n' + diagLine()); return; }
     toast('识别出错：' + c);
   }
 
@@ -769,7 +796,9 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
   // boot
   paintSettings();
   renderNote();
-  if (!SR) showBanner('这个浏览器不能做语音识别。请用手机上的 Chrome 打开这个网址。');
+  $('#diag').textContent = '版本 ' + VERSION + ' · 浏览器：' + BROWSER + ' · 语音识别：' + (SR ? '有' : '没有');
+  if (!isChrome) showBanner(`你现在用的是「${BROWSER}」，语音识别多半用不了。请复制下面的网址，用 Chrome 打开：\n${location.href.split('#')[0]}`);
+  else if (!SR) showBanner('这个 Chrome 不能做语音识别，请更新到最新版。');
   else if (!window.isSecureContext) showBanner('需要用 https 开头的网址打开（例如 GitHub Pages），直接打开本地文件时用不了麦克风。');
 })();
 </script>
