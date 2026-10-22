@@ -1,0 +1,777 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>笔记</title>
+<meta name="description" content="听对方说话，按句编号实时翻译成中文">
+<meta name="theme-color" content="#FCFBF8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#141413" media="(prefers-color-scheme: dark)">
+<meta name="mobile-web-app-capable" content="yes">
+<style>
+/* Layout: a single notes column under a sticky header, with a floating pen button at the bottom right, like a phone notes app */
+:root {
+  --paper: #FCFBF8;
+  --sheet: #FFFFFF;
+  --ink: #1E1D1A;
+  --muted: #847F75;
+  --faint: #CBC6BC;
+  --rule: #ECE8E0;
+  --accent: #D9961A;
+  --accent-ink: #9E6708;
+  --on-accent: #FFFFFF;
+  --danger: #B93B27;
+  --danger-bg: #FBECE8;
+  --scrim: rgba(20, 16, 8, .30);
+  --shadow: 0 6px 18px rgba(70, 50, 10, .18);
+  --font: system-ui, -apple-system, "PingFang SC", "OPPO Sans", "HarmonyOS Sans SC", "Noto Sans CJK SC", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+  --fs: 17px;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #141413; --sheet: #1D1C1A; --ink: #EAE7E0; --muted: #8E8A81; --faint: #4A4740;
+    --rule: #262420; --accent: #E2A43A; --accent-ink: #EBB860; --on-accent: #1A1406;
+    --danger: #E66C54; --danger-bg: #3A1F19; --scrim: rgba(0, 0, 0, .55); --shadow: 0 6px 18px rgba(0, 0, 0, .5);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #141413; --sheet: #1D1C1A; --ink: #EAE7E0; --muted: #8E8A81; --faint: #4A4740;
+  --rule: #262420; --accent: #E2A43A; --accent-ink: #EBB860; --on-accent: #1A1406;
+  --danger: #E66C54; --danger-bg: #3A1F19; --scrim: rgba(0, 0, 0, .55); --shadow: 0 6px 18px rgba(0, 0, 0, .5);
+  color-scheme: dark;
+}
+[hidden] { display: none !important; }
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--paper); color: var(--ink);
+  font-family: var(--font); font-size: 15px; line-height: 1.5;
+  -webkit-tap-highlight-color: transparent;
+}
+button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 8px; }
+svg { display: block; }
+
+/* header */
+.bar {
+  position: sticky; top: 0; z-index: 10; background: var(--paper);
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-left: max(6px, env(safe-area-inset-left, 0px));
+  padding-right: max(6px, env(safe-area-inset-right, 0px));
+  border-bottom: 1px solid transparent; transition: border-color .2s;
+}
+.bar.scrolled { border-bottom-color: var(--rule); }
+.bar-in { display: grid; grid-template-columns: 44px minmax(0, 1fr) 44px 44px; align-items: center; height: 56px; max-width: 760px; margin: 0 auto; }
+.ib { width: 44px; height: 44px; display: grid; place-items: center; color: var(--ink); border-radius: 22px; }
+.ib:active { background: var(--rule); }
+.ttl { min-width: 0; padding: 0 4px; }
+.ttl-btn { display: block; max-width: 100%; text-align: left; font-size: 17px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ttl-in { width: 100%; font: inherit; font-size: 17px; font-weight: 600; color: var(--ink); background: var(--sheet); border: 1px solid var(--rule); border-radius: 8px; padding: 2px 6px; }
+.meta { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.dot { width: 6px; height: 6px; border-radius: 3px; background: var(--faint); flex: none; }
+body.rec .dot { background: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
+body.rec.netbad .dot { background: var(--danger); animation: none; }
+@keyframes pulse { 50% { opacity: .25; } }
+
+/* page */
+main {
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 6px calc(150px + env(safe-area-inset-bottom, 0px));
+}
+.col { max-width: 680px; margin: 0 auto; }
+.empty { color: var(--muted); font-size: 15px; line-height: 1.75; padding-top: 18px; }
+.empty p { margin: 0 0 10px; }
+.empty b { color: var(--ink); font-weight: 600; }
+
+.banner { display: flex; gap: 10px; align-items: flex-start; background: var(--danger-bg); border-radius: 10px; padding: 12px 12px 12px 14px; margin: 8px 0 14px; font-size: 14px; line-height: 1.6; }
+.banner p { margin: 0; flex: 1; min-width: 0; }
+.banner button { color: var(--muted); font-size: 13px; padding: 2px 4px; flex: none; }
+
+ol.list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 16px; }
+.ent { display: grid; grid-template-columns: 1.9em minmax(0, 1fr); column-gap: 8px; font-size: var(--fs); }
+.no { text-align: right; font-size: .7em; line-height: calc(var(--fs) * 1.62); font-weight: 600; color: var(--accent-ink); font-variant-numeric: tabular-nums; }
+.zh { margin: 0; line-height: 1.62; overflow-wrap: anywhere; }
+.src { margin: 3px 0 0; font-size: .78em; line-height: 1.5; color: var(--muted); overflow-wrap: anywhere; }
+body.nosrc .ent:not(.show) .src { display: none; }
+.ent.wait .zh { color: var(--faint); letter-spacing: .1em; }
+.ent.stale .zh, .ent.prov .zh { color: var(--muted); }
+.ent.err .zh { color: var(--danger); font-size: .82em; }
+.ent .tx { cursor: default; }
+.ent.err .tx { cursor: pointer; }
+
+.live .no { color: var(--faint); }
+.live .zh { color: var(--muted); }
+.live .src { color: var(--muted); opacity: .8; }
+.caret::after { content: ""; display: inline-block; width: 2px; height: 1.05em; margin-left: 1px; background: var(--accent); vertical-align: -.17em; animation: blink 1.1s steps(1) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+
+/* dock */
+.dock {
+  position: fixed; z-index: 12; display: flex; align-items: center; gap: 10px;
+  right: calc(18px + env(safe-area-inset-right, 0px)); bottom: calc(22px + env(safe-area-inset-bottom, 0px));
+}
+.chip { height: 34px; min-width: 46px; padding: 0 12px; border-radius: 17px; background: var(--sheet); color: var(--muted); border: 1px solid var(--rule); font-size: 14px; font-weight: 600; box-shadow: 0 2px 6px rgba(0,0,0,.06); }
+.fab { width: 54px; height: 54px; border-radius: 27px; display: grid; place-items: center; background: var(--accent); color: var(--on-accent); box-shadow: var(--shadow); transition: background .2s, color .2s; }
+body.rec .fab { background: var(--ink); color: var(--paper); }
+.fab .i-pause { display: none; }
+body.rec .fab .i-pen { display: none; }
+body.rec .fab .i-pause { display: block; }
+
+.jump { position: fixed; z-index: 11; left: 50%; transform: translateX(-50%); bottom: calc(92px + env(safe-area-inset-bottom, 0px)); background: var(--sheet); color: var(--ink); border: 1px solid var(--rule); border-radius: 16px; padding: 6px 14px; font-size: 13px; box-shadow: var(--shadow); }
+.toast { position: fixed; z-index: 40; left: 50%; transform: translateX(-50%); bottom: calc(96px + env(safe-area-inset-bottom, 0px)); max-width: calc(100% - 32px); background: var(--ink); color: var(--paper); padding: 8px 14px; border-radius: 18px; font-size: 14px; opacity: 0; pointer-events: none; transition: opacity .2s; }
+.toast.on { opacity: .94; }
+
+/* sheets */
+.scrim { position: fixed; inset: 0; z-index: 25; background: var(--scrim); }
+.sheet {
+  position: fixed; z-index: 30; left: 0; right: 0; bottom: 0; max-height: 82vh; overflow-y: auto;
+  background: var(--sheet); border-radius: 16px 16px 0 0; box-shadow: var(--shadow);
+  padding-left: max(18px, env(safe-area-inset-left, 0px)); padding-right: max(18px, env(safe-area-inset-right, 0px));
+  padding-block: 8px calc(18px + env(safe-area-inset-bottom, 0px));
+}
+.sheet-in { max-width: 560px; margin: 0 auto; }
+.grab { width: 36px; height: 4px; border-radius: 2px; background: var(--rule); margin: 4px auto 10px; }
+.sheet h2 { font-size: 16px; font-weight: 600; margin: 0; }
+.shead { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; min-height: 36px; }
+.row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--rule); font-size: 15px; }
+.row > span { min-width: 0; }
+.seg { display: flex; background: var(--paper); border: 1px solid var(--rule); border-radius: 9px; padding: 2px; flex: none; }
+.seg button { padding: 5px 12px; border-radius: 7px; font-size: 14px; color: var(--muted); }
+.seg button[aria-pressed="true"] { background: var(--sheet); color: var(--ink); font-weight: 600; box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+.sw { width: 46px; height: 28px; border-radius: 14px; background: var(--faint); position: relative; flex: none; transition: background .2s; }
+.sw::after { content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 11px; background: #fff; transition: transform .2s; box-shadow: 0 1px 2px rgba(0,0,0,.2); }
+.sw[aria-checked="true"] { background: var(--accent); }
+.sw[aria-checked="true"]::after { transform: translateX(18px); }
+.acts { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; }
+.btn { padding: 9px 16px; border-radius: 10px; border: 1px solid var(--rule); background: var(--paper); font-size: 14px; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
+.hint { color: var(--muted); font-size: 13px; line-height: 1.65; margin: 16px 0 0; }
+.txtbtn { color: var(--accent-ink); font-size: 15px; font-weight: 600; padding: 6px 4px; }
+ul.notes { list-style: none; margin: 0; padding: 0; }
+ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--rule); }
+.nopen { flex: 1; min-width: 0; text-align: left; padding: 11px 0; }
+.nopen b { display: block; font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nopen span { display: block; font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nopen.cur b::after { content: " · 当前"; color: var(--accent-ink); font-weight: 500; font-size: 12px; }
+.ndel { font-size: 13px; color: var(--muted); padding: 8px 4px; flex: none; }
+.ndel.armed { color: var(--danger); font-weight: 600; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::after { animation: none !important; transition: none !important; }
+}
+</style>
+</head>
+<body>
+<header class="bar" id="bar">
+  <div class="bar-in">
+    <button class="ib" id="btnNotes" aria-label="全部笔记">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+    </button>
+    <div class="ttl">
+      <button class="ttl-btn" id="ttlBtn" aria-label="修改标题"></button>
+      <input class="ttl-in" id="ttlIn" type="text" maxlength="40" hidden aria-label="笔记标题">
+      <div class="meta"><span class="dot" aria-hidden="true"></span><span id="metaTxt"></span></div>
+    </div>
+    <button class="ib" id="btnCopy" aria-label="复制全部">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>
+    </button>
+    <button class="ib" id="btnSet" aria-label="设置">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg>
+    </button>
+  </div>
+</header>
+
+<main>
+  <div class="col">
+    <div class="banner" id="banner" hidden><p id="bannerTxt"></p><button id="bannerX">关闭</button></div>
+    <div class="empty" id="empty">
+      <p>点右下角的 <b>✎</b> 开始。</p>
+      <p>对方每说完一句、稍微停顿时，这里就会多一条<b>带编号的中文</b>，下面的小字是原文。</p>
+      <p>右下角的「日 / EN」切换对方说的语言。屏幕会保持常亮，手机放桌上离对方近一点更准。</p>
+    </div>
+    <ol class="list" id="list"></ol>
+    <div class="ent live" id="live" hidden aria-live="polite">
+      <span class="no" id="liveNo"></span>
+      <div class="tx"><p class="zh" id="liveZh"></p><p class="src" id="liveSrc"></p></div>
+    </div>
+  </div>
+</main>
+
+<div class="dock">
+  <button class="chip" id="btnLang" aria-label="对方的语言"></button>
+  <button class="fab" id="btnRec" aria-label="开始">
+    <svg class="i-pen" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/></svg>
+    <svg class="i-pause" width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1.2"/><rect x="14" y="5" width="4" height="14" rx="1.2"/></svg>
+  </button>
+</div>
+<button class="jump" id="jump" hidden>↓ 有新内容</button>
+<div class="toast" id="toast" role="status"></div>
+
+<div class="scrim" id="scrim" hidden></div>
+<section class="sheet" id="setSheet" hidden aria-label="设置">
+  <div class="sheet-in">
+    <div class="grab"></div>
+    <div class="shead"><h2>设置</h2></div>
+    <div class="row"><span>对方说的语言</span><div class="seg" id="segLang"><button data-v="ja">日语</button><button data-v="en">英语</button></div></div>
+    <div class="row"><span>停顿多久算一句</span><div class="seg" id="segPause"><button data-v="800">短</button><button data-v="1300">中</button><button data-v="2000">长</button></div></div>
+    <div class="row"><span>边听边预览翻译</span><button class="sw" id="swLive" role="switch" aria-label="边听边预览翻译"></button></div>
+    <div class="row"><span>显示原文</span><button class="sw" id="swSrc" role="switch" aria-label="显示原文"></button></div>
+    <div class="row"><span>字号</span><div class="seg" id="segSize"><button data-v="s">小</button><button data-v="m">中</button><button data-v="l">大</button></div></div>
+    <div class="acts">
+      <button class="btn" id="btnExport">导出 .txt</button>
+      <button class="btn" id="btnNew">新建笔记</button>
+    </div>
+    <p class="hint">「停顿多久算一句」：对方说话慢、句子被切碎时调长；想更快出译文时调短。<br>语音识别和翻译由 Google 完成，需要联网。笔记只保存在这台手机的浏览器里。</p>
+  </div>
+</section>
+<section class="sheet" id="notesSheet" hidden aria-label="全部笔记">
+  <div class="sheet-in">
+    <div class="grab"></div>
+    <div class="shead"><h2>全部笔记</h2><button class="txtbtn" id="btnNew2">＋ 新建</button></div>
+    <ul class="notes" id="notesList"></ul>
+  </div>
+</section>
+
+<script>
+(() => {
+  'use strict';
+  const $ = (s, r = document) => r.querySelector(s);
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const pad = n => String(n).padStart(2, '0');
+  const clean = s => (s || '').replace(/\s+/g, ' ').trim();
+  const norm = s => (s || '').replace(/[\s。、，,.．！!？?「」『』…]/g, '').toLowerCase();
+  const LANGS = { ja: { rec: 'ja-JP', tr: 'ja', chip: '日', name: '日语' }, en: { rec: 'en-US', tr: 'en', chip: 'EN', name: '英语' } };
+
+  /* ---------- storage ---------- */
+  const store = {
+    get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
+    set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch (e) { return false; } }
+  };
+  const K = { notes: 'bijiyi.notes.v1', cur: 'bijiyi.cur.v1', cfg: 'bijiyi.cfg.v1' };
+  const cfg = Object.assign({ lang: 'ja', pause: 1300, live: true, src: true, size: 'm' }, store.get(K.cfg, {}));
+  if (!LANGS[cfg.lang]) cfg.lang = 'ja';
+  let notes = store.get(K.notes, []);
+  if (!Array.isArray(notes)) notes = [];
+  notes = notes.filter(n => n && Array.isArray(n.entries));
+  notes.forEach(n => n.entries.forEach(e => { e.prov = false; if (e.st === 'wait') e.st = e.zh ? 'ok' : 'err'; }));
+  let note = notes.find(n => n.id === store.get(K.cur, null)) || notes[0] || null;
+  if (!note) note = newNote();
+
+  function newNote() {
+    const now = Date.now();
+    const n = { id: 'n' + now.toString(36), created: now, title: '', entries: [] };
+    notes = notes.filter(x => x.entries.length);
+    notes.unshift(n);
+    if (notes.length > 50) notes.length = 50;
+    return n;
+  }
+  function titleOf(n) {
+    if (n.title) return n.title;
+    const d = new Date(n.created);
+    return `${d.getMonth() + 1}月${d.getDate()}日 周${'日一二三四五六'[d.getDay()]} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+  let saveT = 0, storageWarned = false;
+  function save(now) {
+    clearTimeout(saveT);
+    const run = () => {
+      const ok = store.set(K.notes, notes);
+      store.set(K.cur, note.id);
+      if (!ok && !storageWarned) { storageWarned = true; showBanner('浏览器存储空间满了，新内容可能存不下来。打开「全部笔记」删掉一些旧笔记。'); }
+    };
+    if (now) run(); else saveT = setTimeout(run, 400);
+  }
+  const saveCfg = () => store.set(K.cfg, cfg);
+
+  /* ---------- rendering ---------- */
+  const listEl = $('#list'), liveEl = $('#live'), liveNo = $('#liveNo'), liveZh = $('#liveZh'), liveSrc = $('#liveSrc');
+  const nodes = new WeakMap();
+
+  function renderNote() {
+    listEl.textContent = '';
+    note.entries.forEach(e => listEl.appendChild(makeNode(e)));
+    $('#ttlBtn').textContent = titleOf(note);
+    updateMeta(); updateLive();
+    window.scrollTo(0, document.documentElement.scrollHeight);
+  }
+  function makeNode(e) {
+    const li = document.createElement('li');
+    li.className = 'ent';
+    li.innerHTML = '<span class="no"></span><div class="tx"><p class="zh"></p><p class="src"></p></div>';
+    li._e = e;
+    nodes.set(e, li);
+    paint(e);
+    return li;
+  }
+  function paint(e) {
+    const li = nodes.get(e);
+    if (!li) return;
+    li.querySelector('.no').textContent = e.n;
+    const zh = li.querySelector('.zh');
+    if (e.zh) zh.textContent = e.zh;
+    else if (e.st === 'err') zh.textContent = '翻译没成功，点这里重试';
+    else zh.textContent = '···';
+    li.querySelector('.src').textContent = e.src;
+    li.classList.toggle('wait', !e.zh && e.st === 'wait');
+    li.classList.toggle('stale', !!e.zh && e.st === 'wait');
+    li.classList.toggle('err', !e.zh && e.st === 'err');
+    li.classList.toggle('prov', !!e.prov);
+  }
+  function updateMeta() {
+    const c = note.entries.length;
+    $('#metaTxt').textContent = (c ? c + ' 条' : '空白笔记') + (want ? ' · 记录中' : '');
+    $('#empty').hidden = c > 0 || want;
+  }
+  function nextNo() { const l = note.entries[note.entries.length - 1]; return l ? l.n + 1 : 1; }
+  function updateLive(src, zh) {
+    liveEl.hidden = !want;
+    liveNo.textContent = nextNo();
+    liveSrc.textContent = src || '';
+    liveZh.textContent = zh || '';
+    liveZh.classList.toggle('caret', !zh);
+  }
+  function nearBottom() { return window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 140; }
+  function follow(stick) {
+    if (stick) { window.scrollTo(0, document.documentElement.scrollHeight); $('#jump').hidden = true; }
+    else if (want || note.entries.length) $('#jump').hidden = false;
+  }
+  window.addEventListener('scroll', () => {
+    $('#bar').classList.toggle('scrolled', window.scrollY > 4);
+    if (nearBottom()) $('#jump').hidden = true;
+  }, { passive: true });
+  $('#jump').addEventListener('click', () => follow(true));
+
+  /* ---------- translation ---------- */
+  class HttpErr extends Error { constructor(s) { super('HTTP ' + s); this.status = s; } }
+  async function gtx(text, sl, signal) {
+    const u = 'https://translate.googleapis.com/translate_a/single?client=gtx&dt=t&sl=' + sl + '&tl=zh-CN&q=' + encodeURIComponent(text.slice(0, 1500));
+    const r = await fetch(u, { signal });
+    if (!r.ok) throw new HttpErr(r.status);
+    const j = await r.json();
+    const out = (j && j[0] || []).map(x => (x && x[0]) || '').join('').trim();
+    if (!out) throw new Error('empty');
+    return out;
+  }
+  async function mymemory(text, sl, signal) {
+    const u = 'https://api.mymemory.translated.net/get?langpair=' + sl + '|zh-CN&q=' + encodeURIComponent(text.slice(0, 450));
+    const r = await fetch(u, { signal });
+    if (!r.ok) throw new HttpErr(r.status);
+    const j = await r.json();
+    const out = j && j.responseData && j.responseData.translatedText;
+    if (!out || Number(j.responseStatus) !== 200) throw new Error('mymemory');
+    return out.trim();
+  }
+  let netBad = false;
+  function setNet(bad) { netBad = bad; document.body.classList.toggle('netbad', bad); }
+  async function translate(text, lang, signal) {
+    const sl = (LANGS[lang] || LANGS.ja).tr;
+    try { const t = await gtx(text, sl, signal); setNet(false); return t; } catch (e) { if (signal.aborted) throw e; }
+    await sleep(500);
+    if (signal.aborted) throw new Error('aborted');
+    try { const t = await gtx(text, sl, signal); setNet(false); return t; } catch (e) { if (signal.aborted) throw e; }
+    const t = await mymemory(text, sl, signal);
+    setNet(false);
+    return t;
+  }
+  const inflight = new WeakMap(), retrT = new WeakMap();
+  async function translateEntry(e) {
+    const old = inflight.get(e); if (old) old.abort();
+    const ctl = new AbortController();
+    inflight.set(e, ctl);
+    e.st = 'wait'; paint(e);
+    let zh = null;
+    try { zh = await translate(e.src, e.lang, ctl.signal); }
+    catch (err) { if (ctl.signal.aborted) return; }
+    if (ctl.signal.aborted) return;
+    inflight.delete(e);
+    if (zh) { e.zh = zh; e.st = 'ok'; } else { e.st = 'err'; setNet(true); }
+    const stick = nearBottom();
+    paint(e); follow(stick); save();
+  }
+  function retranslateSoon(e) {
+    clearTimeout(retrT.get(e));
+    retrT.set(e, setTimeout(() => translateEntry(e), 450));
+  }
+
+  /* ---------- entries ---------- */
+  function addEntry(src, prov) {
+    const e = { n: nextNo(), src, zh: '', lang: cfg.lang, ts: Date.now(), st: 'wait', prov: !!prov };
+    const stick = nearBottom();
+    note.entries.push(e);
+    listEl.appendChild(makeNode(e));
+    updateMeta(); updateLive();
+    follow(stick);
+    translateEntry(e);
+    save();
+    return e;
+  }
+  function setEntrySrc(e, src, soon) {
+    if (norm(src) === norm(e.src)) { if (src !== e.src) { e.src = src; paint(e); } return; }
+    e.src = src;
+    e.st = 'wait';
+    paint(e);
+    if (soon) retranslateSoon(e); else translateEntry(e);
+    save();
+  }
+  listEl.addEventListener('click', ev => {
+    const li = ev.target.closest('li.ent');
+    if (!li || !li._e) return;
+    const e = li._e;
+    if (e.st === 'err' && !e.zh) translateEntry(e);
+    else li.classList.toggle('show');
+  });
+
+  /* ---------- speech recognition ---------- */
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let rec = null, sess = null, want = false, restartT = 0, stallT = 0, startedAt = 0, quickEnds = 0, wakeLock = null;
+  let liveTimer = 0, liveAt = 0, liveSeq = 0, liveCtl = null, liveBlockUntil = 0;
+
+  // Some Android builds repeat earlier finished sentences at the start of later results; drop that repeated part.
+  function stripPrefix(t, fin) {
+    if (!t || norm(fin).length < 6) return t;
+    let i = 0, j = 0;
+    while (j < fin.length) {
+      if (/\s/.test(fin[j])) { j++; continue; }
+      while (i < t.length && /\s/.test(t[i])) i++;
+      if (i >= t.length || t[i].toLowerCase() !== fin[j].toLowerCase()) return t;
+      i++; j++;
+    }
+    return t.slice(i).trim();
+  }
+
+  function start() {
+    if (!SR) { showBanner('这个浏览器不能做语音识别。请用手机上的 Chrome 打开这个网址。'); return; }
+    if (!window.isSecureContext) { showBanner('需要用 https 开头的网址打开（例如 GitHub Pages），直接打开本地文件时用不了麦克风。'); return; }
+    want = true; quickEnds = 0; hideBanner();
+    document.body.classList.add('rec');
+    $('#btnRec').setAttribute('aria-label', '暂停');
+    updateMeta(); updateLive();
+    follow(true);
+    keepAwake();
+    spawn();
+  }
+  function stop() {
+    want = false;
+    clearTimeout(restartT); clearTimeout(stallT); clearTimeout(liveTimer); liveTimer = 0;
+    document.body.classList.remove('rec');
+    $('#btnRec').setAttribute('aria-label', '开始');
+    if (rec) { try { rec.stop(); } catch (e) { } }
+    updateMeta(); updateLive();
+    releaseAwake();
+  }
+  function spawn() {
+    clearTimeout(restartT);
+    if (!want) return;
+    if (rec) {
+      const old = rec; rec = null;
+      if (sess) flush(sess);
+      try { old.abort(); } catch (e) { }
+    }
+    const r = new SR();
+    r.lang = LANGS[cfg.lang].rec;
+    r.continuous = true;
+    r.interimResults = true;
+    r.maxAlternatives = 1;
+    const s = { done: new Set(), fin: '', interim: '', pending: null, liveFor: '' };
+    r.onresult = ev => { if (rec === r) onResult(ev, s); };
+    r.onerror = ev => { if (rec === r) onError(ev); };
+    r.onend = () => { if (rec === r) onEnd(s); };
+    rec = r; sess = s;
+    try { r.start(); startedAt = Date.now(); }
+    catch (e) { rec = null; restartT = setTimeout(spawn, 700); }
+  }
+  function onResult(ev, s) {
+    let interim = '';
+    for (let i = ev.resultIndex; i < ev.results.length; i++) {
+      const res = ev.results[i];
+      const t = res[0] ? res[0].transcript : '';
+      if (res.isFinal) {
+        if (s.done.has(i)) continue;
+        s.done.add(i);
+        gotFinal(s, t);
+      } else interim += t;
+    }
+    setInterim(s, stripPrefix(clean(interim), s.fin));
+  }
+  function gotFinal(s, raw) {
+    const t = stripPrefix(clean(raw), s.fin);
+    if (!t) return;
+    s.fin = s.fin + ' ' + t;
+    clearTimeout(stallT);
+    if (s.pending) {
+      const e = s.pending; s.pending = null;
+      e.prov = false;
+      setEntrySrc(e, t, false);
+      paint(e); save();
+      return;
+    }
+    const last = note.entries[note.entries.length - 1];
+    if (last && norm(last.src) === norm(t) && Date.now() - last.ts < 4000) return;
+    addEntry(t, false);
+  }
+  function setInterim(s, t) {
+    const changed = t !== s.interim;
+    s.interim = t;
+    if (changed) {
+      clearTimeout(stallT);
+      if (t) stallT = setTimeout(() => stall(s), cfg.pause);
+    }
+    if (s.pending) {
+      // the sentence kept going after we had already shown it: keep that numbered line up to date
+      if (t && changed && norm(t).length >= norm(s.pending.src).length) setEntrySrc(s.pending, t, true);
+      updateLive();
+      return;
+    }
+    const stick = nearBottom();
+    if (!t) { s.liveFor = ''; updateLive(); }
+    else {
+      updateLive(t, s.liveFor && t.startsWith(s.liveFor.slice(0, Math.max(1, s.liveFor.length - 2))) ? liveZh.textContent : '');
+      if (changed) liveTranslate(s);
+    }
+    if (stick) follow(true);
+  }
+  function stall(s) {
+    if (sess !== s || s.pending || !s.interim) return;
+    s.pending = addEntry(s.interim, true);
+    s.liveFor = '';
+    updateLive();
+  }
+  function flush(s) {
+    clearTimeout(stallT);
+    if (s.pending) {
+      const e = s.pending; s.pending = null; e.prov = false;
+      if (s.interim && norm(s.interim).length > norm(e.src).length) setEntrySrc(e, s.interim, false);
+      paint(e); save();
+    } else if (s.interim) {
+      addEntry(s.interim, false);
+    }
+    s.interim = ''; s.liveFor = '';
+    updateLive();
+  }
+  function onEnd(s) {
+    flush(s);
+    rec = null;
+    if (!want) { updateMeta(); updateLive(); return; }
+    if (document.hidden) return; // resumes when the page is visible again
+    quickEnds = (Date.now() - startedAt < 1500) ? quickEnds + 1 : 0;
+    if (quickEnds === 6) toast('识别一直被中断，检查一下网络');
+    restartT = setTimeout(spawn, quickEnds > 4 ? 2000 : 120);
+  }
+  function onError(ev) {
+    const c = ev.error;
+    if (c === 'no-speech' || c === 'aborted' || document.hidden) return;
+    if (c === 'network') { setNet(true); return; }
+    const msg = {
+      'not-allowed': '麦克风权限被拒绝了。点地址栏左边的图标 → 权限 → 麦克风 → 允许，然后再点 ✎。',
+      'service-not-allowed': '手机上的语音识别服务用不了。请确认装了「Google」应用并更新到最新，并在系统设置的「语音输入」里选 Google，然后再试。',
+      'audio-capture': '麦克风被别的应用占用了（比如正在通话或录音），关掉之后再点 ✎。',
+      'language-not-supported': '当前的语音识别服务不支持这个语言。请安装或更新「Google」应用后再试。'
+    }[c];
+    if (msg) { stop(); showBanner(msg); return; }
+    toast('识别出错：' + c);
+  }
+
+  // Preview translation of the sentence still being spoken, at most about once a second
+  function liveTranslate(s) {
+    if (!cfg.live || liveTimer || Date.now() < liveBlockUntil) return;
+    const wait = Math.max(150, 900 - (Date.now() - liveAt));
+    liveTimer = setTimeout(async () => {
+      liveTimer = 0;
+      const t = s.interim;
+      if (sess !== s || s.pending || norm(t).length < 3 || t === s.liveFor) return;
+      liveAt = Date.now();
+      if (liveCtl) liveCtl.abort();
+      const ctl = liveCtl = new AbortController();
+      const seq = ++liveSeq;
+      try {
+        const zh = await gtx(t, LANGS[cfg.lang].tr, ctl.signal);
+        if (seq !== liveSeq || sess !== s || s.pending || !s.interim) return;
+        s.liveFor = t;
+        const stick = nearBottom();
+        updateLive(s.interim, zh);
+        if (stick) follow(true);
+      } catch (e) {
+        if (e && e.status === 429) liveBlockUntil = Date.now() + 5 * 60 * 1000;
+      }
+      if (sess === s && s.interim && s.interim !== t) liveTranslate(s);
+    }, wait);
+  }
+
+  async function keepAwake() {
+    try {
+      if ('wakeLock' in navigator && !wakeLock) {
+        wakeLock = await navigator.wakeLock.request('screen');
+        wakeLock.addEventListener('release', () => { wakeLock = null; });
+      }
+    } catch (e) { wakeLock = null; }
+  }
+  function releaseAwake() { try { if (wakeLock) wakeLock.release(); } catch (e) { } wakeLock = null; }
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      if (want) { keepAwake(); quickEnds = 0; if (!rec) spawn(); }
+    } else save(true);
+  });
+  window.addEventListener('pagehide', () => save(true));
+
+  /* ---------- UI ---------- */
+  $('#btnRec').addEventListener('click', () => (want ? stop() : start()));
+
+  function paintLang() {
+    $('#btnLang').textContent = LANGS[cfg.lang].chip;
+    $('#btnLang').setAttribute('aria-label', '对方的语言：' + LANGS[cfg.lang].name);
+    document.querySelectorAll('#segLang button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === cfg.lang)));
+  }
+  function setLang(v) {
+    if (!LANGS[v] || v === cfg.lang) return;
+    cfg.lang = v; saveCfg(); paintLang();
+    toast('对方的语言：' + LANGS[v].name);
+    if (want) { quickEnds = 0; spawn(); }
+  }
+  $('#btnLang').addEventListener('click', () => setLang(cfg.lang === 'ja' ? 'en' : 'ja'));
+
+  function paintSettings() {
+    paintLang();
+    document.querySelectorAll('#segPause button').forEach(b => b.setAttribute('aria-pressed', String(Number(b.dataset.v) === cfg.pause)));
+    document.querySelectorAll('#segSize button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === cfg.size)));
+    $('#swLive').setAttribute('aria-checked', String(!!cfg.live));
+    $('#swSrc').setAttribute('aria-checked', String(!!cfg.src));
+    document.body.classList.toggle('nosrc', !cfg.src);
+    document.documentElement.style.setProperty('--fs', { s: '15px', m: '17px', l: '20px' }[cfg.size] || '17px');
+  }
+  $('#segLang').addEventListener('click', e => { const b = e.target.closest('button'); if (b) setLang(b.dataset.v); });
+  $('#segPause').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; cfg.pause = Number(b.dataset.v); saveCfg(); paintSettings(); });
+  $('#segSize').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; cfg.size = b.dataset.v; saveCfg(); paintSettings(); });
+  $('#swLive').addEventListener('click', () => { cfg.live = !cfg.live; saveCfg(); paintSettings(); if (!cfg.live) updateLive(sess && !sess.pending ? sess.interim : ''); });
+  $('#swSrc').addEventListener('click', () => { cfg.src = !cfg.src; saveCfg(); paintSettings(); });
+
+  let openSheet = null;
+  function showSheet(id) {
+    hideSheet();
+    openSheet = $(id); openSheet.hidden = false; $('#scrim').hidden = false;
+  }
+  function hideSheet() { if (openSheet) openSheet.hidden = true; openSheet = null; $('#scrim').hidden = true; }
+  $('#scrim').addEventListener('click', hideSheet);
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') hideSheet(); });
+  $('#btnSet').addEventListener('click', () => { paintSettings(); showSheet('#setSheet'); });
+  $('#btnNotes').addEventListener('click', () => { paintNotes(); showSheet('#notesSheet'); });
+
+  function switchTo(n) {
+    if (sess) flush(sess);
+    note = n;
+    renderNote(); save(true);
+  }
+  function makeNew() {
+    if (!note.entries.length) { toast('当前已经是空白笔记'); hideSheet(); return; }
+    if (sess) flush(sess);
+    note = newNote();
+    renderNote(); save(true);
+    hideSheet();
+    toast('已新建笔记，编号从 1 开始');
+  }
+  $('#btnNew').addEventListener('click', makeNew);
+  $('#btnNew2').addEventListener('click', makeNew);
+
+  function paintNotes() {
+    const ul = $('#notesList');
+    ul.textContent = '';
+    notes.filter(n => n.entries.length || n === note).forEach(n => {
+      const li = document.createElement('li');
+      const open = document.createElement('button');
+      open.className = 'nopen' + (n === note ? ' cur' : '');
+      const b = document.createElement('b'); b.textContent = titleOf(n);
+      const sp = document.createElement('span');
+      const first = n.entries.find(e => e.zh);
+      sp.textContent = n.entries.length + ' 条' + (first ? ' · ' + first.zh : '');
+      open.append(b, sp);
+      open.addEventListener('click', () => { if (n !== note) switchTo(n); hideSheet(); });
+      const del = document.createElement('button');
+      del.className = 'ndel'; del.textContent = '删除';
+      del.addEventListener('click', () => {
+        if (!del.classList.contains('armed')) { del.classList.add('armed'); del.textContent = '确认删除'; setTimeout(() => { del.classList.remove('armed'); del.textContent = '删除'; }, 3000); return; }
+        notes = notes.filter(x => x !== n);
+        if (n === note) { note = notes[0] || newNote(); renderNote(); }
+        save(true); paintNotes();
+      });
+      li.append(open, del);
+      ul.appendChild(li);
+    });
+  }
+
+  function noteText(n) {
+    const lines = [titleOf(n), ''];
+    n.entries.forEach(e => { lines.push(e.n + '. ' + (e.zh || '（未翻译）')); lines.push('   ' + e.src); });
+    return lines.join('\n');
+  }
+  $('#btnCopy').addEventListener('click', () => {
+    if (!note.entries.length) { toast('还没有内容'); return; }
+    const txt = noteText(note);
+    const fallback = () => {
+      const ta = document.createElement('textarea');
+      ta.value = txt; ta.setAttribute('readonly', ''); ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      let ok = false; try { ok = document.execCommand('copy'); } catch (e) { }
+      ta.remove();
+      toast(ok ? '已复制全部内容' : '复制失败，请用导出');
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(() => toast('已复制全部内容'), fallback);
+    else fallback();
+  });
+  $('#btnExport').addEventListener('click', () => {
+    if (!note.entries.length) { toast('还没有内容'); return; }
+    const blob = new Blob([noteText(note)], { type: 'text/plain;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = titleOf(note).replace(/[\\/:*?"<>|]/g, '-') + '.txt';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  });
+
+  // rename
+  const ttlBtn = $('#ttlBtn'), ttlIn = $('#ttlIn');
+  ttlBtn.addEventListener('click', () => { ttlIn.value = note.title || ''; ttlIn.placeholder = titleOf(note); ttlBtn.hidden = true; ttlIn.hidden = false; ttlIn.focus(); });
+  const endRename = () => { if (ttlIn.hidden) return; note.title = ttlIn.value.trim(); ttlIn.hidden = true; ttlBtn.hidden = false; ttlBtn.textContent = titleOf(note); save(); };
+  ttlIn.addEventListener('blur', endRename);
+  ttlIn.addEventListener('keydown', e => { if (e.key === 'Enter') ttlIn.blur(); if (e.key === 'Escape') { ttlIn.value = note.title || ''; ttlIn.blur(); } });
+
+  // banner + toast
+  function showBanner(t) { $('#bannerTxt').textContent = t; $('#banner').hidden = false; window.scrollTo(0, 0); }
+  function hideBanner() { $('#banner').hidden = true; }
+  $('#bannerX').addEventListener('click', hideBanner);
+  let toastT = 0;
+  function toast(t) { const el = $('#toast'); el.textContent = t; el.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => el.classList.remove('on'), 2200); }
+
+  // home-screen icon + standalone manifest, so "Add to Home screen" opens it like an app
+  (function installMeta() {
+    try {
+      const draw = size => {
+        const c = document.createElement('canvas'); c.width = c.height = size;
+        const g = c.getContext('2d'), u = size / 48;
+        g.fillStyle = '#D9961A'; g.beginPath();
+        if (g.roundRect) g.roundRect(0, 0, size, size, 10 * u); else g.rect(0, 0, size, size);
+        g.fill();
+        g.fillStyle = '#FFFDF7'; g.fillRect(11 * u, 9 * u, 26 * u, 30 * u);
+        g.fillStyle = '#E3D6BC';
+        [17, 23, 29].forEach(y => g.fillRect(15 * u, y * u, 18 * u, 2 * u));
+        return c.toDataURL('image/png');
+      };
+      const i192 = draw(192), i512 = draw(512);
+      const href = location.href.split('#')[0];
+      const m = { name: '笔记', short_name: '笔记', start_url: href, scope: href.replace(/[^/]*$/, ''), display: 'standalone', background_color: '#FCFBF8', theme_color: '#FCFBF8',
+        icons: [{ src: i192, sizes: '192x192', type: 'image/png' }, { src: i512, sizes: '512x512', type: 'image/png' }] };
+      const add = (rel, h) => { const l = document.createElement('link'); l.rel = rel; l.href = h; document.head.appendChild(l); };
+      add('icon', i192); add('apple-touch-icon', i192);
+      if (/^https?:/.test(location.protocol)) add('manifest', 'data:application/manifest+json,' + encodeURIComponent(JSON.stringify(m)));
+    } catch (e) { }
+  })();
+
+  // boot
+  paintSettings();
+  renderNote();
+  if (!SR) showBanner('这个浏览器不能做语音识别。请用手机上的 Chrome 打开这个网址。');
+  else if (!window.isSecureContext) showBanner('需要用 https 开头的网址打开（例如 GitHub Pages），直接打开本地文件时用不了麦克风。');
+})();
+</script>
+</body>
+</html>
