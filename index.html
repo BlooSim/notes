@@ -116,6 +116,9 @@ body.nosrc .ent:not(.show) .src { display: none; }
 .chip { height: 34px; min-width: 46px; padding: 0 12px; border-radius: 17px; background: var(--sheet); color: var(--muted); border: 1px solid var(--rule); font-size: 14px; font-weight: 600; box-shadow: 0 2px 6px rgba(0,0,0,.06); }
 .fab { width: 54px; height: 54px; border-radius: 27px; display: grid; place-items: center; background: var(--accent); color: var(--on-accent); box-shadow: var(--shadow); transition: background .2s, color .2s; }
 body.rec .fab { background: var(--ink); color: var(--paper); }
+.hold { height: 46px; padding: 0 16px 0 13px; border-radius: 23px; display: flex; align-items: center; gap: 6px; background: var(--sheet); color: var(--ink); border: 1px solid var(--rule); font-size: 14px; font-weight: 600; box-shadow: 0 2px 6px rgba(0,0,0,.06); touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; transition: background .15s, color .15s, transform .15s; }
+body.ptt .hold { background: var(--accent); color: var(--on-accent); border-color: var(--accent); transform: scale(1.06); box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 22%, transparent), var(--shadow); }
+body.ptt .live .zh { color: var(--accent-ink); }
 .fab .i-pause { display: none; }
 body.rec .fab .i-pen { display: none; }
 body.rec .fab .i-pause { display: block; }
@@ -199,6 +202,7 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     <div class="empty" id="empty">
       <p>点右下角的 <b>✎</b> 开始。</p>
       <p>对方每说完一句、稍微停顿时，这里就会多一条<b>带编号的中文</b>，下面的小字是原文。</p>
+      <p>也可以<b>按住「按住」按钮</b>：对方开始说话时按下，说完松开，这一整段会变成一条翻译。</p>
       <p>右下角的「日 / EN」切换对方说的语言。屏幕会保持常亮，手机放桌上离对方近一点更准。</p>
     </div>
     <ol class="list" id="list"></ol>
@@ -211,6 +215,10 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
 
 <div class="dock">
   <button class="chip" id="btnLang" aria-label="对方的语言"></button>
+  <button class="hold" id="btnHold" aria-label="按住说话，松开后翻译">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg>
+    <span id="holdTxt">按住</span>
+  </button>
   <button class="fab" id="btnRec" aria-label="开始">
     <svg class="i-pen" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/></svg>
     <svg class="i-pause" width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1.2"/><rect x="14" y="5" width="4" height="14" rx="1.2"/></svg>
@@ -348,7 +356,7 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
   }
   function nextNo() { const l = note.entries[note.entries.length - 1]; return l ? l.n + 1 : 1; }
   function updateLive(src, zh) {
-    liveEl.hidden = !want;
+    liveEl.hidden = !want && !ptt;
     liveNo.textContent = nextNo();
     liveSrc.textContent = src || '';
     liveZh.textContent = zh || '';
@@ -437,6 +445,46 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     if (soon) retranslateSoon(e); else translateEntry(e);
     save();
   }
+  function removeEntry(e) {
+    const i = note.entries.indexOf(e);
+    if (i < 0) return;
+    note.entries.splice(i, 1);
+    const old = inflight.get(e); if (old) old.abort();
+    clearTimeout(retrT.get(e));
+    const li = nodes.get(e); if (li) li.remove();
+    updateMeta(); updateLive(); save();
+  }
+
+  // Some phones resend the whole sentence again and again while it is being spoken
+  // ("A", "A B", "A", "A B C"). Text that repeats what is already on screen updates
+  // those lines instead of adding new numbered lines.
+  const MERGE_WINDOW = 15000;
+  function absorb(t) {
+    const tn = norm(t);
+    if (!tn) return true;
+    const es = note.entries, now = Date.now();
+    const last = es[es.length - 1];
+    if (!last || now - last.ts > MERGE_WINDOW) return false;
+    const ln = norm(last.src);
+    if (ln === tn || (tn.length >= 4 && ln.includes(tn))) return true; // already shown
+    let k = es.length - 1;
+    while (k >= 0 && now - es[k].ts < MERGE_WINDOW && norm(es[k].src).length >= 2 && tn.includes(norm(es[k].src))) k--;
+    const first = k + 1;
+    if (first > es.length - 1) return false; // a new sentence
+    const keep = es[first];
+    for (let j = es.length - 1; j > first; j--) removeEntry(es[j]);
+    keep.prov = false; keep.ts = now;
+    setEntrySrc(keep, t, false);
+    paint(keep);
+    return true;
+  }
+  function reopenFor(t) {
+    const es = note.entries, last = es[es.length - 1];
+    if (!last || Date.now() - last.ts > MERGE_WINDOW) return null;
+    const tn = norm(t), ln = norm(last.src);
+    return ln.length >= 2 && tn.length > ln.length && tn.includes(ln) ? last : null;
+  }
+
   listEl.addEventListener('click', ev => {
     const li = ev.target.closest('li.ent');
     if (!li || !li._e) return;
@@ -449,6 +497,7 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   let rec = null, sess = null, want = false, restartT = 0, stallT = 0, startedAt = 0, quickEnds = 0, wakeLock = null;
   let liveTimer = 0, liveAt = 0, liveSeq = 0, liveCtl = null, liveBlockUntil = 0;
+  let ptt = null; // hold-to-talk in progress: { text, interim, releasing, t0, timer }
 
   // Some Android builds repeat earlier finished sentences at the start of later results; drop that repeated part.
   function stripPrefix(t, fin) {
@@ -463,7 +512,7 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     return t.slice(i).trim();
   }
 
-  const VERSION = 'v5';
+  const VERSION = 'v7';
 
   /* ---------- diagnostics: what the recognition service actually does ---------- */
   const dlog = [];
@@ -632,7 +681,7 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     let ws;
     try { ws = new WebSocket('wss://api.deepgram.com/v1/listen?' + params, ['token', cfg.dgKey]); }
     catch (e) { lastErr = 'ws'; stop(); showBanner(explainFailure()); return; }
-    const s = { done: new Set(), fin: '', interim: '', pending: null, liveFor: '', heard: false, buf: '', lang, t0: Date.now(), mr: null };
+    const s = { done: new Set(), fin: '', interim: '', pending: null, liveFor: '', heard: false, buf: '', lang, t0: Date.now(), mr: null, ptt: !!ptt };
     ws._s = s;
     dgWs = ws; sess = s;
     ws.onopen = () => {
@@ -661,7 +710,7 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
       dgCommit(s); flush(s);
       if (dgWs !== ws) return;
       dgWs = null;
-      if (!want) { dgRelease(); return; }
+      if (!want) { dgRelease(); if (s.ptt && ptt && ptt.releasing) pttCommit(); return; }
       if (document.hidden) return; // reconnects when the page is visible again
       if (!s.heard && Date.now() - s.t0 < 4000) {
         quickEnds++;
@@ -705,6 +754,7 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
         spawnWaiting = true;
         ensureSrStream().then(ok => {
           spawnWaiting = false;
+          if (!want) { releaseSrStream(); return; }
           if (!ok) { trackBroken = true; nextMode(); }
           spawn();
         });
@@ -717,7 +767,7 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     r.continuous = mode.c;
     r.interimResults = true;
     r.maxAlternatives = 1;
-    const s = { done: new Set(), fin: '', interim: '', pending: null, liveFor: '', heard: false, mode: modeIdx };
+    const s = { done: new Set(), fin: '', interim: '', pending: null, liveFor: '', heard: false, mode: modeIdx, ptt: !!ptt };
     dStarts++;
     dl(`启动#${dStarts} ${r.lang} ${mode.n}`);
     if (r.addEventListener) Object.keys(EVN).filter(n => n !== 'end').forEach(n => r.addEventListener(n, () => { if (rec === r) dl(EVN[n]); }));
@@ -757,23 +807,30 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     if (!t) return;
     s.fin = s.fin + ' ' + t;
     clearTimeout(stallT);
+    if (s.ptt) { if (ptt) { ptt.text = combine(ptt.text, t, s.lang || cfg.lang); ptt.interim = ''; paintPtt(); } return; }
     if (s.pending) {
       const e = s.pending; s.pending = null;
-      e.prov = false;
-      setEntrySrc(e, t, false);
+      e.prov = false; e.ts = Date.now();
+      // never shrink a line that already holds more of the sentence than this result
+      if (!norm(e.src).includes(norm(t))) setEntrySrc(e, t, false);
       paint(e); save();
       return;
     }
-    const last = note.entries[note.entries.length - 1];
-    if (last && norm(last.src) === norm(t) && Date.now() - last.ts < 4000) return;
+    if (absorb(t)) return;
     addEntry(t, false);
   }
   function setInterim(s, t) {
     const changed = t !== s.interim;
     s.interim = t;
+    if (s.ptt) { if (ptt) { ptt.interim = t; paintPtt(); } return; }
     if (changed) {
       clearTimeout(stallT);
       if (t) stallT = setTimeout(() => stall(s), cfg.pause);
+    }
+    if (!s.pending && t && changed) {
+      // the phone is re-sending a sentence that is already on screen, with more words: continue that line
+      const e = reopenFor(t);
+      if (e) { s.pending = e; e.prov = true; e.ts = Date.now(); paint(e); }
     }
     if (s.pending) {
       // the sentence kept going after we had already shown it: keep that numbered line up to date
@@ -790,19 +847,25 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     if (stick) follow(true);
   }
   function stall(s) {
-    if (sess !== s || s.pending || !s.interim) return;
+    if (s.ptt || sess !== s || s.pending || !s.interim) return;
+    if (absorb(s.interim)) { updateLive(); return; }
     s.pending = addEntry(s.interim, true);
     s.liveFor = '';
     updateLive();
   }
   function flush(s) {
     clearTimeout(stallT);
+    if (s.ptt) {
+      if (ptt && s.interim) { ptt.text = combine(ptt.text, s.interim, s.lang || cfg.lang); ptt.interim = ''; }
+      s.interim = '';
+      return;
+    }
     if (s.pending) {
       const e = s.pending; s.pending = null; e.prov = false;
       if (s.interim && norm(s.interim).length > norm(e.src).length) setEntrySrc(e, s.interim, false);
       paint(e); save();
     } else if (s.interim) {
-      addEntry(s.interim, false);
+      if (!absorb(s.interim)) addEntry(s.interim, false);
     }
     s.interim = ''; s.liveFor = '';
     updateLive();
@@ -812,11 +875,11 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     flush(s);
     rec = null;
     // until something has been recognized in this run, try the next mode after every two silent sessions
-    if (want && !s.heard && !dHeardSinceStart) {
+    if (want && !s.ptt && !s.heard && !dHeardSinceStart) {
       silentEnds++;
       if (silentEnds % 2 === 0) { nextMode(); dl('换成模式：' + curMode().n); }
     }
-    if (!want) { updateMeta(); updateLive(); return; }
+    if (!want) { updateMeta(); updateLive(); if (s.ptt && ptt && ptt.releasing) pttCommit(); return; }
     if (document.hidden) return; // resumes when the page is visible again
     // a session that ends within 1.5 s without hearing anything is a failed start
     quickEnds = (!s.heard && Date.now() - startedAt < 1500) ? quickEnds + 1 : 0;
@@ -888,8 +951,95 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
   });
   window.addEventListener('pagehide', () => save(true));
 
+  /* ---------- hold to talk: everything said while the button is held becomes one numbered line ---------- */
+  function combine(a, b, lang) {
+    const an = norm(a), bn = norm(b);
+    if (!an) return b || '';
+    if (!bn) return a;
+    if (bn.includes(an)) return b;   // the phone re-sent the whole thing with more words
+    if (an.includes(bn)) return a;   // nothing new
+    return a + ' ' + b;              // a space keeps separate sentences apart for the translator
+  }
+  function paintPtt(msg) {
+    if (!ptt) return;
+    updateLive(combine(ptt.text, ptt.interim, cfg.lang), msg || (ptt.text || ptt.interim ? '正在听…松开后翻译' : '正在听…'));
+    follow(true);
+  }
+  function pttStart() {
+    if (ptt) return;
+    if (!window.isSecureContext) { showBanner('需要用 https 开头的网址打开（例如 GitHub Pages），直接打开本地文件时用不了麦克风。'); return; }
+    if (cfg.engine === 'dg') {
+      if (!cfg.dgKey) { paintSettings(); showSheet('#setSheet'); toast('先在这里填写 Deepgram 的 Key'); return; }
+    } else if (!SR) { showBanner('这个浏览器不能做语音识别，请用 Chrome 打开。'); return; }
+    if (want) stop(); // switch off continuous translation; what it heard so far is kept
+    if (rec) { const old = rec; rec = null; if (sess) flush(sess); try { old.abort(); } catch (e) { } }
+    ptt = { text: '', interim: '', releasing: false, t0: Date.now(), timer: 0, short: false };
+    want = true; quickEnds = 0; lastErr = ''; hideBanner();
+    if (cfg.engine !== 'dg' && !actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { actx = null; } }
+    if (actx && actx.state === 'suspended') actx.resume().catch(() => { });
+    document.body.classList.add('ptt');
+    $('#holdTxt').textContent = '松开结束';
+    try { if (navigator.vibrate) navigator.vibrate(15); } catch (e) { }
+    dl('按住说话 开始');
+    updateMeta(); paintPtt();
+    if (cfg.engine === 'dg') dgStart(); else spawn();
+  }
+  function pttEnd() {
+    if (!ptt || ptt.releasing) return;
+    ptt.releasing = true;
+    ptt.short = Date.now() - ptt.t0 < 600 && !ptt.text && !ptt.interim;
+    want = false;
+    clearTimeout(restartT); clearTimeout(stallT);
+    document.body.classList.remove('ptt');
+    $('#holdTxt').textContent = '按住';
+    dl('按住说话 松开');
+    paintPtt('正在整理这一段…');
+    if (cfg.engine === 'dg') {
+      if (dgWs) dgStop(); else { dgRelease(); pttCommit(); return; }
+    } else {
+      if (rec) { try { rec.stop(); } catch (e) { } } else { pttCommit(); return; }
+    }
+    ptt.timer = setTimeout(pttCommit, 2500); // in case the service never reports the end
+  }
+  function pttCommit() {
+    if (!ptt) return;
+    clearTimeout(ptt.timer);
+    const text = clean(combine(ptt.text, ptt.interim, cfg.lang));
+    const short = ptt.short;
+    ptt = null;
+    if (rec) { const r = rec; rec = null; try { r.abort(); } catch (e) { } }
+    releaseSrStream();
+    updateMeta(); updateLive();
+    if (text) { addEntry(text, false); follow(true); }
+    else toast(short ? '要按住不放，等对方说完再松开' : '这一段没有听到内容');
+  }
+  (() => {
+    const hold = $('#btnHold');
+    let down = false;
+    const press = e => {
+      if (e) e.preventDefault();
+      if (down) return;
+      down = true;
+      try { if (e && e.pointerId != null) hold.setPointerCapture(e.pointerId); } catch (x) { }
+      pttStart();
+    };
+    const release = e => {
+      if (!down) return;
+      down = false;
+      if (e) e.preventDefault();
+      pttEnd();
+    };
+    hold.addEventListener('pointerdown', press);
+    hold.addEventListener('pointerup', release);
+    hold.addEventListener('pointercancel', release);
+    hold.addEventListener('lostpointercapture', release);
+    hold.addEventListener('contextmenu', e => e.preventDefault());
+    hold.addEventListener('keydown', e => { if ((e.key === ' ' || e.key === 'Enter') && !e.repeat) press(e); });
+    hold.addEventListener('keyup', e => { if (e.key === ' ' || e.key === 'Enter') release(e); });
+  })();
+
   /* ---------- UI ---------- */
-  $('#btnRec').addEventListener('click', () => (want ? stop() : start()));
+  $('#btnRec').addEventListener('click', () => { if (ptt) return; want ? stop() : start(); });
 
   function paintLang() {
     $('#btnLang').textContent = LANGS[cfg.lang].chip;
@@ -900,7 +1050,7 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     if (!LANGS[v] || v === cfg.lang) return;
     cfg.lang = v; saveCfg(); paintLang();
     toast('对方的语言：' + LANGS[v].name);
-    restartEngine();
+    if (!ptt) restartEngine();
   }
   $('#btnLang').addEventListener('click', () => setLang(cfg.lang === 'ja' ? 'en' : 'ja'));
 
