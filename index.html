@@ -174,6 +174,15 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
 .ndel { font-size: 13px; color: var(--muted); padding: 8px 4px; flex: none; }
 .ndel.armed { color: var(--danger); font-weight: 600; }
 
+/* small window (system floating window or split screen): only the latest segment, large */
+body.mini .bar, body.mini .empty, body.mini #btnPip, body.mini .chip, body.mini .jump { display: none !important; }
+body.mini main { padding-block: 10px calc(70px + env(safe-area-inset-bottom, 0px)); }
+body.mini ol.list > li:not(:last-child) { display: none; }
+body.mini .ent { font-size: calc(var(--fs) + 3px); }
+body.mini .live .zh, body.mini .live .src { font-size: 14px; }
+body.mini .dock { right: calc(10px + env(safe-area-inset-right, 0px)); bottom: calc(10px + env(safe-area-inset-bottom, 0px)); gap: 8px; }
+body.mini .hold { height: 38px; padding: 0 12px 0 10px; font-size: 13px; }
+body.mini .fab { width: 42px; height: 42px; }
 @media (prefers-reduced-motion: reduce) {
   *, *::after { animation: none !important; transition: none !important; }
 }
@@ -552,7 +561,7 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     return t.slice(i).trim();
   }
 
-  const VERSION = 'v8';
+  const VERSION = 'v9';
 
   /* ---------- diagnostics: what the recognition service actually does ---------- */
   const dlog = [];
@@ -920,7 +929,7 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
       if (silentEnds % 2 === 0) { nextMode(); dl('换成模式：' + curMode().n); }
     }
     if (!want) { updateMeta(); updateLive(); if (s.ptt && ptt && ptt.releasing) pttCommit(); return; }
-    if (document.hidden && !pipOn) return; // resumes when the page is visible again
+    if (document.hidden) { dl('页面在后台，等回到页面再继续'); return; } // Chrome stops recognition for hidden pages
     // a session that ends within 1.5 s without hearing anything is a failed start
     quickEnds = (!s.heard && Date.now() - startedAt < 1500) ? quickEnds + 1 : 0;
     if (quickEnds >= 8) { stop(); showBanner(explainFailure()); return; }
@@ -930,7 +939,7 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     const c = ev.error;
     dl('错误：' + c + (ev.message ? ' ' + ev.message : ''));
     if (c !== 'aborted') lastErr = c;
-    if (c === 'no-speech' || c === 'aborted' || (document.hidden && !pipOn)) return;
+    if (c === 'no-speech' || c === 'aborted' || document.hidden) return; // background errors are expected; it resumes on return
     if (c === 'network') { setNet(true); return; }
     const msg = {
       'not-allowed': '麦克风权限被拒绝了。点地址栏左边的图标 → 权限 → 麦克风 → 允许，然后再点 ✎。',
@@ -992,6 +1001,15 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     } else save(true);
   });
   window.addEventListener('pagehide', () => save(true));
+  function checkMini() {
+    const mini = window.innerHeight < 560 || window.innerWidth < 330;
+    if (mini !== document.body.classList.contains('mini')) {
+      document.body.classList.toggle('mini', mini);
+      dl(mini ? '小窗字幕样式' : '正常样式');
+      follow(true);
+    }
+  }
+  window.addEventListener('resize', checkMini);
 
   /* ---------- hold to talk: everything said while the button is held becomes one numbered line ---------- */
   function combine(a, b, lang) {
@@ -1111,10 +1129,11 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     g.font = `600 26px ${PIP_FONT}`; g.fillStyle = '#E2A43A';
     g.fillText(last ? '#' + last.n : '#–', P, P - 6);
     g.font = `500 22px ${PIP_FONT}`; g.fillStyle = '#8E8A81';
-    const state = holding ? '● 按住中' : want ? '● 记录中' : '已暂停';
+    const bgPaused = want && document.hidden && cfg.engine !== 'dg';
+    const state = holding ? '● 按住中' : bgPaused ? '后台暂停中' : want ? '● 记录中' : '已暂停';
     g.fillText(state, W - P - g.measureText(state).width, P - 4);
     // body: the latest whole segment, as large as it fits
-    const top = P + 40, bottomReserve = liveText || Date.now() < pipHintUntil ? 70 : 20;
+    const top = P + 40, bottomReserve = liveText || Date.now() < pipHintUntil || (want && document.hidden && cfg.engine !== 'dg') ? 70 : 20;
     const zh = last ? (last.zh || '翻译中…') : '还没有内容';
     const src = last ? last.src : '';
     const areaH = H - top - bottomReserve - P / 2;
@@ -1134,7 +1153,7 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
       sl.forEach(l => { if (y + size * 0.56 * 1.4 <= H - bottomReserve) { g.fillText(l, P, y); y += size * 0.56 * 1.4; } });
     }
     // footer: what is being said right now, or a one-time hint
-    const foot = liveText ? '正在听：' + liveText : Date.now() < pipHintUntil ? '按 Home 键回到桌面，这个画面会变成浮窗' : '';
+    const foot = liveText ? '正在听：' + liveText : bgPaused ? '回到翻译页面后会自动继续' : Date.now() < pipHintUntil ? '按 Home 键回到桌面，这个画面会变成浮窗' : '';
     if (foot) {
       g.font = `400 24px ${PIP_FONT}`; g.fillStyle = liveText ? '#C9A35B' : '#8E8A81';
       let f = foot; while (g.measureText(f).width > W - 2 * P && f.length > 6) f = '…' + f.slice(Math.ceil(f.length * 0.1) + 1);
@@ -1152,6 +1171,11 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     document.body.classList.remove('pipon');
     try { pipVideo.pause(); } catch (e) { }
   }
+  function pipTip() {
+    if (cfg.engine === 'dg' || store.get('bijiyi.piptip', false)) { toast('浮窗已打开'); return; }
+    store.set('bijiyi.piptip', true);
+    showBanner('浮窗只负责显示字幕。Chrome 一旦切到后台就不能再听写，浮窗会显示「后台暂停中」，回到这个页面后自动继续。\n\n想一边用别的应用一边翻译：在最近任务里把 Chrome 用系统的「浮窗 / 小窗」或「分屏」打开。Chrome 仍在屏幕上，就能一直听写；窗口变小时，页面会自动换成只显示最新一段的字幕样式。');
+  }
   async function openPip() {
     if (document.pictureInPictureElement) { try { await document.exitPictureInPicture(); } catch (e) { } stopPip(); return; }
     if (document.fullscreenElement === pipVideo) { try { await document.exitFullscreen(); } catch (e) { } stopPip(); return; }
@@ -1161,7 +1185,7 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
       await pipVideo.play();
     } catch (e) { dl('浮窗视频：' + (e && e.name)); }
     if (document.pictureInPictureEnabled && pipVideo.requestPictureInPicture) {
-      try { await pipVideo.requestPictureInPicture(); dl('浮窗已打开'); toast('浮窗已打开，可以切到别的应用'); return; }
+      try { await pipVideo.requestPictureInPicture(); dl('浮窗已打开'); pipTip(); return; }
       catch (e) { dl('浮窗：' + (e && e.name)); }
     }
     // Chrome on Android: a full-screen video becomes a floating window when you go to the home screen
@@ -1399,6 +1423,7 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
   // boot
   paintSettings();
   renderNote();
+  checkMini();
   if (!isChrome) showBanner(`你现在用的是「${BROWSER}」，语音识别多半用不了。请复制下面的网址，用 Chrome 打开：\n${location.href.split('#')[0]}`);
   else if (cfg.engine !== 'dg' && !SR) showBanner('这个 Chrome 不能做语音识别，请更新到最新版。' + SWITCH_TIP);
   else if (!window.isSecureContext) showBanner('需要用 https 开头的网址打开（例如 GitHub Pages），直接打开本地文件时用不了麦克风。');
