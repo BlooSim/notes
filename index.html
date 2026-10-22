@@ -154,10 +154,18 @@ body.pipon #btnPip { color: var(--accent-ink); }
 .keybox { padding: 12px 0; border-bottom: 1px solid var(--rule); display: flex; flex-direction: column; gap: 8px; font-size: 14px; color: var(--muted); }
 .keybox input { width: 100%; font: inherit; font-size: 15px; color: var(--ink); background: var(--paper); border: 1px solid var(--rule); border-radius: 9px; padding: 9px 10px; }
 .keybox .hint { margin: 0; }
+.prov { display: flex; flex-direction: column; gap: 6px; padding-top: 6px; }
+.prov-h { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; color: var(--ink); }
+.prov-h b { font-weight: 600; font-size: 15px; }
+.pst { font-size: 12px; color: var(--muted); text-align: right; }
+.pst.ok { color: var(--accent-ink); }
+.pst.bad { color: var(--danger); }
+#llmBox .row { border-bottom: 0; padding-bottom: 0; color: var(--ink); }
 .keybox a { color: var(--accent-ink); }
 .diagline { font-size: 12px !important; }
 .diagbox .acts { margin-top: 10px; }
 .diagbox #testOut { color: var(--ink); }
+#testKeysOut { white-space: pre-line; }
 .diaglog { margin-top: 8px; font: 12px/1.6 ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow-y: auto; }
 .acts { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; }
 .btn { padding: 9px 16px; border-radius: 10px; border: 1px solid var(--rule); background: var(--paper); font-size: 14px; }
@@ -249,11 +257,32 @@ body.mini .fab { width: 42px; height: 42px; }
   <div class="sheet-in">
     <div class="grab"></div>
     <div class="shead"><h2>设置</h2></div>
-    <div class="row"><span>识别方式</span><div class="seg" id="segEngine"><button data-v="chrome">手机自带</button><button data-v="dg">Deepgram</button></div></div>
+    <div class="row"><span>识别方式</span><div class="seg" id="segEngine"><button data-v="chrome">手机</button><button data-v="llm">大模型</button><button data-v="dg">Deepgram</button></div></div>
     <div class="keybox" id="keyBox" hidden>
       <label for="dgKey">Deepgram API Key</label>
       <input id="dgKey" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="把 Key 粘贴到这里">
       <p class="hint" id="keyHint"></p>
+    </div>
+    <div class="keybox" id="llmBox" hidden>
+      <div>大模型识别更准，填一个 Key 就能用；填多个时，一个额度用完会自动换下一个，全都用不了时改用手机识别。</div>
+      <div class="prov">
+        <div class="prov-h"><b>Gemini</b><span class="pst" id="stg"></span></div>
+        <input id="keyg" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="粘贴 Gemini API Key">
+        <p class="hint">效果最好：识别和翻译一次完成。在 <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a> 用 Google 账号免费创建，不用信用卡。</p>
+      </div>
+      <div class="prov">
+        <div class="prov-h"><b>Groq</b><span class="pst" id="stq"></span></div>
+        <input id="keyq" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="粘贴 Groq API Key（可选）">
+        <p class="hint">免费的 Whisper 识别，速度很快。在 <a href="https://console.groq.com/keys" target="_blank" rel="noopener">Groq</a> 免费注册。它可能不允许网页直接调用，用不了时会自动跳过。</p>
+      </div>
+      <div class="prov">
+        <div class="prov-h"><b>Mistral</b><span class="pst" id="stm"></span></div>
+        <input id="keym" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="粘贴 Mistral API Key（可选）">
+        <p class="hint">Voxtral 识别。在 <a href="https://console.mistral.ai/api-keys" target="_blank" rel="noopener">Mistral</a> 选免费计划，需要验证手机号；免费计划的内容可能被用于训练模型。</p>
+      </div>
+      <div class="row"><span>连续翻译也用大模型</span><button class="sw" id="swLlmCont" role="switch" aria-label="连续翻译也用大模型"></button></div>
+      <div class="acts"><button class="btn" id="btnTestKeys">检查 Key 能不能用</button></div>
+      <p class="hint" id="testKeysOut">关掉「连续翻译也用大模型」可以省额度：只有「按住」时用大模型，连续翻译用手机识别。</p>
     </div>
     <div class="row"><span>对方说的语言</span><div class="seg" id="segLang"><button data-v="ja">日语</button><button data-v="en">英语</button></div></div>
     <div class="row"><span>停顿多久算一句</span><div class="seg" id="segPause"><button data-v="800">短</button><button data-v="1300">中</button><button data-v="2000">长</button></div></div>
@@ -297,13 +326,16 @@ body.mini .fab { width: 42px; height: 42px; }
     set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch (e) { return false; } }
   };
   const K = { notes: 'bijiyi.notes.v1', cur: 'bijiyi.cur.v1', cfg: 'bijiyi.cfg.v1' };
-  const cfg = Object.assign({ lang: 'ja', pause: 1300, live: true, src: true, size: 'm', engine: 'chrome', dgKey: '' }, store.get(K.cfg, {}));
+  const cfg = Object.assign({ lang: 'ja', pause: 1300, live: true, src: true, size: 'm', engine: 'chrome', dgKey: '', gKey: '', qKey: '', mKey: '', llmCont: true }, store.get(K.cfg, {}));
   if (!LANGS[cfg.lang]) cfg.lang = 'ja';
-  if (cfg.engine !== 'dg') cfg.engine = 'chrome';
+  if (cfg.engine !== 'dg' && cfg.engine !== 'llm') cfg.engine = 'chrome';
   let notes = store.get(K.notes, []);
   if (!Array.isArray(notes)) notes = [];
   notes = notes.filter(n => n && Array.isArray(n.entries));
-  notes.forEach(n => n.entries.forEach(e => { e.prov = false; if (e.st === 'wait') e.st = e.zh ? 'ok' : 'err'; }));
+  notes.forEach(n => {
+    n.entries = n.entries.filter(e => e.st !== 'asr' || e.src); // pieces still waiting for an AI service when the page closed
+    n.entries.forEach(e => { e.prov = false; if (e.st === 'wait' || e.st === 'asr') e.st = e.zh ? 'ok' : 'err'; });
+  });
   let note = notes.find(n => n.id === store.get(K.cur, null)) || notes[0] || null;
   if (!note) note = newNote();
 
@@ -359,9 +391,10 @@ body.mini .fab { width: 42px; height: 42px; }
     const zh = li.querySelector('.zh');
     if (e.zh) zh.textContent = e.zh;
     else if (e.st === 'err') zh.textContent = '翻译没成功，点这里重试';
+    else if (e.st === 'asr') zh.textContent = '识别中…';
     else zh.textContent = '···';
     li.querySelector('.src').textContent = e.src;
-    li.classList.toggle('wait', !e.zh && e.st === 'wait');
+    li.classList.toggle('wait', !e.zh && (e.st === 'wait' || e.st === 'asr'));
     li.classList.toggle('stale', !!e.zh && e.st === 'wait');
     li.classList.toggle('err', !e.zh && e.st === 'err');
     li.classList.toggle('prov', !!e.prov);
@@ -498,6 +531,7 @@ body.mini .fab { width: 42px; height: 42px; }
     const i = note.entries.indexOf(e);
     if (i < 0) return;
     note.entries.splice(i, 1);
+    for (let j = i; j < note.entries.length; j++) { note.entries[j].n--; paint(note.entries[j]); }
     const old = inflight.get(e); if (old) old.abort();
     clearTimeout(retrT.get(e));
     const li = nodes.get(e); if (li) li.remove();
@@ -561,7 +595,7 @@ body.mini .fab { width: 42px; height: 42px; }
     return t.slice(i).trim();
   }
 
-  const VERSION = 'v9';
+  const VERSION = 'v10';
 
   /* ---------- diagnostics: what the recognition service actually does ---------- */
   const dlog = [];
@@ -628,7 +662,7 @@ body.mini .fab { width: 42px; height: 42px; }
   function recentEvents() { return dlog.slice(-4).map(x => x.slice(9)).join(' → '); }
   function paintHint() {
     const el = $('#liveDiag');
-    const show = want && cfg.engine !== 'dg' && !dHeardSinceStart && Date.now() - listenSince > 6000;
+    const show = want && cfg.engine !== 'dg' && !cloudOn && !dHeardSinceStart && Date.now() - listenSince > 6000;
     el.hidden = !show;
     if (show) el.textContent = `还没收到识别结果 · 已启动 ${dStarts} 次 · 模式：${curMode().n}${micLevel >= 0 ? ` · 网页麦克风音量 ${Math.round(micLevel * 100)}%` : ''} · 最近：${recentEvents()}`;
   }
@@ -647,7 +681,8 @@ body.mini .fab { width: 42px; height: 42px; }
   const BROWSER = browserName();
   const isChrome = /^Chrome /.test(BROWSER);
   const errNames = { network: '连不上语音识别服务器', 'service-not-allowed': '语音服务不可用', 'not-allowed': '没有麦克风权限', 'audio-capture': '麦克风被占用', 'no-speech': '没听到声音' };
-  function diagLine() { return `（${VERSION} · ${cfg.engine === 'dg' ? 'Deepgram' : '手机自带识别'} · 浏览器：${BROWSER}${lastErr ? ' · 错误：' + lastErr : ''}）`; }
+  const engineName = () => cfg.engine === 'dg' ? 'Deepgram' : cfg.engine === 'llm' ? '大模型' : '手机自带识别';
+  function diagLine() { return `（${VERSION} · ${engineName()} · 浏览器：${BROWSER}${lastErr ? ' · 错误：' + lastErr : ''}）`; }
   const SWITCH_TIP = '\n\n手机自带的识别如果一直用不了，可以在右上角 ⋯ 设置里把「识别方式」换成 Deepgram，它不依赖手机上的 Google 服务。';
   function explainFailure() {
     if (cfg.engine === 'dg') return `连不上 Deepgram。可能是 Key 填错了、额度用完了，或者网络有问题。请在右上角 ⋯ 设置里检查 Key。\n${diagLine()}`;
@@ -658,7 +693,11 @@ body.mini .fab { width: 42px; height: 42px; }
 
   function start() {
     if (!window.isSecureContext) { showBanner('需要用 https 开头的网址打开（例如 GitHub Pages），直接打开本地文件时用不了麦克风。'); return; }
-    if (cfg.engine === 'dg') {
+    const useCloud = cfg.engine === 'llm' && cfg.llmCont && anyKey();
+    if (cfg.engine === 'llm' && !anyKey()) { paintSettings(); showSheet('#setSheet'); toast('先在这里填写至少一个大模型的 Key'); return; }
+    if (useCloud) {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { showBanner('这个浏览器不支持网页录音，请用 Chrome 打开。'); return; }
+    } else if (cfg.engine === 'dg') {
       if (!cfg.dgKey) { paintSettings(); showSheet('#setSheet'); toast('先在这里填写 Deepgram 的 Key'); return; }
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder || !window.WebSocket) { showBanner('这个浏览器不支持网页录音，请用 Chrome 打开。'); return; }
     } else if (!SR) {
@@ -675,7 +714,7 @@ body.mini .fab { width: 42px; height: 42px; }
     updateMeta(); updateLive();
     follow(true);
     keepAwake();
-    if (cfg.engine === 'dg') dgStart(); else spawn();
+    if (cfg.engine === 'dg') dgStart(); else if (useCloud) cloudStart(); else spawn();
   }
   function stop() {
     want = false;
@@ -684,6 +723,7 @@ body.mini .fab { width: 42px; height: 42px; }
     document.body.classList.remove('rec');
     $('#btnRec').setAttribute('aria-label', '开始');
     if (rec) { try { rec.stop(); } catch (e) { } }
+    cloudStop();
     releaseSrStream();
     dgStop();
     updateMeta(); updateLive();
@@ -693,6 +733,343 @@ body.mini .fab { width: 42px; height: 42px; }
     if (!want) return;
     quickEnds = 0;
     if (cfg.engine === 'dg') dgConnect(); else spawn();
+  }
+
+  /* ---------- 大模型 engine ----------
+     The page records the mic itself (16 kHz PCM), cuts it into pieces at pauses (or one piece per hold),
+     and sends each piece to a free AI service: Gemini → Groq → Mistral. When a service is out of quota
+     it moves to the next; when none can answer, the phone recognizer's text for that piece is used.
+     The phone recognizer runs alongside on the same mic stream as a live preview. */
+  const SR16 = 16000, FRAME = 320; // 20 ms frames
+  const cap = { on: false, mode: 'vad', src: null, proc: null, sink: null, rest: null, frame: new Int16Array(FRAME), fill: 0, fsum: 0, pre: [], hot: 0, seg: null, noise: 0.004, level: 0, ratio: 3 };
+  let cloudOn = false, previewDead = false, fallbackNoted = false, lastOkBy = '';
+  const preview = { text: '', interim: '' };
+  function newSeg(frames) { return { frames, voiced: 0, silence: 0, t0: Date.now() - frames.length * 20 }; }
+  function capStart(stream, mode) {
+    capStop();
+    if (!actx || !stream) return false;
+    try {
+      if (actx.state === 'suspended') actx.resume().catch(() => { });
+      cap.src = actx.createMediaStreamSource(stream);
+      cap.proc = actx.createScriptProcessor(4096, 1, 1);
+      cap.sink = actx.createGain(); cap.sink.gain.value = 0;
+      cap.src.connect(cap.proc); cap.proc.connect(cap.sink); cap.sink.connect(actx.destination);
+    } catch (e) { dl('网页录音失败：' + (e && e.name)); capStop(); return false; }
+    cap.on = true; cap.mode = mode; cap.rest = null; cap.fill = 0; cap.fsum = 0; cap.pre = []; cap.hot = 0;
+    cap.seg = mode === 'hold' ? newSeg([]) : null;
+    cap.ratio = actx.sampleRate / SR16;
+    cap.proc.onaudioprocess = ev => { if (cap.on) capFeed(ev.inputBuffer.getChannelData(0)); };
+    dl(`网页录音：${mode === 'hold' ? '按住整段' : '按停顿切段'} ${actx.sampleRate}Hz`);
+    return true;
+  }
+  function capStop() {
+    cap.on = false;
+    try { if (cap.proc) cap.proc.onaudioprocess = null; } catch (e) { }
+    [cap.src, cap.proc, cap.sink].forEach(n => { try { if (n) n.disconnect(); } catch (e) { } });
+    cap.src = cap.proc = cap.sink = null;
+  }
+  function capFeed(input) {
+    let buf = input;
+    if (cap.rest && cap.rest.length) { buf = new Float32Array(cap.rest.length + input.length); buf.set(cap.rest); buf.set(input, cap.rest.length); }
+    const r = cap.ratio;
+    let pos = 0;
+    while (Math.floor(pos + r) <= buf.length) {
+      const a = Math.floor(pos), b = Math.max(a + 1, Math.floor(pos + r));
+      let s = 0; for (let k = a; k < b; k++) s += buf[k];
+      const v = s / (b - a);
+      cap.frame[cap.fill++] = Math.max(-1, Math.min(1, v)) * 32767;
+      cap.fsum += v * v;
+      if (cap.fill === FRAME) { vadStep(cap.frame.slice(), Math.sqrt(cap.fsum / FRAME)); cap.fill = 0; cap.fsum = 0; }
+      pos += r;
+    }
+    cap.rest = buf.slice(Math.floor(pos));
+  }
+  function vadStep(frame, rms) {
+    cap.level = Math.max(cap.level * 0.8, Math.min(1, rms * 6));
+    micLevel = cap.level;
+    const th = Math.max(0.01, cap.noise * 3);
+    if (cap.mode === 'hold') { if (cap.seg) { cap.seg.frames.push(frame); if (rms > th) cap.seg.voiced++; } return; }
+    if (!cap.seg) {
+      cap.noise = cap.noise * 0.98 + Math.min(rms, cap.noise * 2 + 0.002) * 0.02; // background level, tracked between speech
+      cap.pre.push(frame); if (cap.pre.length > 25) cap.pre.shift();                // 0.5 s kept from before speech starts
+      if (rms > th) {
+        if (++cap.hot >= 4) { cap.seg = newSeg(cap.pre); cap.seg.voiced = cap.hot; cap.pre = []; cap.hot = 0; paintCloudLive(); }
+      } else cap.hot = 0;
+      return;
+    }
+    const sg = cap.seg;
+    sg.frames.push(frame);
+    if (rms > th * 0.8) { sg.voiced++; sg.silence = 0; } else sg.silence++;
+    if (sg.silence * 20 >= cfg.pause || sg.frames.length * 20 >= 25000) cutSeg();
+  }
+  function joinFrames(frames) { const out = new Int16Array(frames.length * FRAME); frames.forEach((f, i) => out.set(f, i * FRAME)); return out; }
+  function cutSeg() {
+    const sg = cap.seg; cap.seg = null;
+    if (!sg) return;
+    const frames = sg.frames.slice(0, sg.frames.length - Math.max(0, sg.silence - 15)); // keep 0.3 s of the closing pause
+    if (sg.voiced < 12) { dl('声音太短，忽略'); paintCloudLive(); return; }          // under 0.25 s: a cough or a bump
+    onSegment(joinFrames(frames));
+  }
+  function endHold() {
+    const sg = cap.seg; cap.seg = null;
+    capStop();
+    return sg && sg.frames.length ? { pcm: joinFrames(sg.frames), voiced: sg.voiced } : null;
+  }
+  function wavBlob(pcm) {
+    const buf = new ArrayBuffer(44 + pcm.length * 2), v = new DataView(buf);
+    const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+    w(0, 'RIFF'); v.setUint32(4, 36 + pcm.length * 2, true); w(8, 'WAVE'); w(12, 'fmt ');
+    v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+    v.setUint32(24, SR16, true); v.setUint32(28, SR16 * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+    w(36, 'data'); v.setUint32(40, pcm.length * 2, true);
+    new Int16Array(buf, 44).set(pcm);
+    return new Blob([buf], { type: 'audio/wav' });
+  }
+  function blobB64(blob) {
+    return new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(String(fr.result).split(',')[1] || ''); fr.onerror = () => rej(fr.error); fr.readAsDataURL(blob); });
+  }
+  function paintCloudLive() {
+    if (!cloudOn || ptt) return;
+    const stick = nearBottom();
+    updateLive(combine(preview.text, preview.interim, cfg.lang), cap.seg ? '正在听…' : '');
+    if (stick) follow(true);
+  }
+  function addPlaceholder(src) {
+    const e = { n: nextNo(), src: src || '', zh: '', lang: cfg.lang, ts: Date.now(), st: 'asr', prov: false };
+    const stick = nearBottom();
+    note.entries.push(e);
+    listEl.appendChild(makeNode(e));
+    updateMeta(); updateLive(); follow(stick); save();
+    return e;
+  }
+  function onSegment(pcm) {
+    if (!cloudOn) return;
+    // the phone recognizer's text for this stretch arrives a moment after the audio ends
+    const fallbackP = new Promise(res => setTimeout(() => {
+      const t = clean(combine(preview.text, preview.interim, cfg.lang));
+      preview.text = ''; preview.interim = '';
+      paintCloudLive();
+      res(t);
+    }, 900));
+    enqueue({ e: addPlaceholder(), pcm, lang: cfg.lang, fallbackP });
+    paintCloudLive();
+  }
+
+  // ---- services ----
+  class ApiErr extends Error { constructor(kind, msg, retry) { super(String(msg || kind).slice(0, 300)); this.kind = kind; this.retry = retry || 0; } }
+  let pst = store.get('bijiyi.pst', {}); // pause state per service and per model: { until, why }
+  if (!pst || typeof pst !== 'object') pst = {};
+  function pstSet(k, why, until) { pst[k] = { why, until }; store.set('bijiyi.pst', pst); }
+  const cooling = k => pst[k] && pst[k].until > Date.now();
+  function nextPacificMidnight() {
+    const now = new Date();
+    const la = new Date(now.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }));
+    const next = new Date(la); next.setHours(24, 0, 30, 0);
+    return now.getTime() + (next - la);
+  }
+  async function apiFetch(url, opts) {
+    let r;
+    try { r = await fetch(url, opts); }
+    catch (e) { throw new ApiErr(navigator.onLine === false ? 'net' : 'blocked', e && e.message); }
+    let text = '', body = null;
+    try { text = await r.text(); body = JSON.parse(text); } catch (e) { }
+    if (r.ok) return body;
+    const em = body && (body.error && (body.error.message || body.error) || body.message || body.detail);
+    const m = typeof em === 'string' ? em : em ? JSON.stringify(em) : (text || 'HTTP ' + r.status);
+    if (r.status === 401 || r.status === 403 || (r.status === 400 && /api[ _-]?key/i.test(m))) throw new ApiErr('key', m);
+    if (r.status === 429) {
+      const details = (body && body.error && body.error.details) || [];
+      const all = m + ' ' + JSON.stringify(details);
+      let retry = 0;
+      details.forEach(d => { if (d && d.retryDelay) retry = parseFloat(d.retryDelay) * 1000; });
+      const ra = r.headers.get('retry-after'); if (!retry && ra) retry = parseFloat(ra) * 1000;
+      const mm = m.match(/try again in ([\d.]+)\s*(ms|s|m)\b/i);
+      if (!retry && mm) retry = parseFloat(mm[1]) * (mm[2] === 'ms' ? 1 : mm[2] === 'm' ? 60000 : 1000);
+      throw new ApiErr(/per ?day|PerDay|RPD|daily/i.test(all) ? 'day' : 'quota', m, retry || 60000);
+    }
+    if (r.status === 404) throw new ApiErr('model', m);
+    if (r.status === 400 || r.status === 422) throw new ApiErr('bad', m);
+    throw new ApiErr('server', m);
+  }
+  function setModelState(k, err) {
+    const now = Date.now();
+    const until = err.kind === 'day' ? nextPacificMidnight() : err.kind === 'quota' ? now + Math.min(err.retry || 60000, 30 * 60000)
+      : err.kind === 'model' || err.kind === 'bad' ? now + 24 * 3600e3 : now + 60000;
+    pstSet(k, err.kind, until);
+    dl(`${k} ${err.kind}：${err.message.slice(0, 80)}`);
+  }
+  function parseJsonLoose(t) {
+    try { return JSON.parse(t); } catch (e) { }
+    const a = t.indexOf('{'), b = t.lastIndexOf('}');
+    if (a >= 0 && b > a) { try { return JSON.parse(t.slice(a, b + 1)); } catch (e) { } }
+    return { src: t };
+  }
+  function recentContext(e) {
+    const i = e ? note.entries.indexOf(e) : note.entries.length;
+    return note.entries.slice(Math.max(0, i - 3), Math.max(0, i)).filter(x => x.src).map(x => x.src).join('\n').slice(-600);
+  }
+  function orderModels(pid, models) {
+    const last = cfg.lastModel && cfg.lastModel[pid];
+    return last && models.includes(last) ? [last, ...models.filter(m => m !== last)] : models;
+  }
+  function rememberModel(pid, model) {
+    cfg.lastModel = cfg.lastModel || {};
+    if (cfg.lastModel[pid] !== model) { cfg.lastModel[pid] = model; saveCfg(); }
+  }
+  const noThink = {};
+  const G_MODELS = ['gemini-flash-lite-latest', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-flash-latest', 'gemini-3.6-flash', 'gemini-2.5-flash'];
+  function geminiPrompt(job) {
+    const ln = job.lang === 'en' ? 'English' : 'Japanese';
+    const ctx = recentContext(job.e);
+    return `This audio is one segment of a spoken conversation or meeting in Japan, recorded on a phone. The listener is a Chinese speaker who does not understand ${ln} well.\n` +
+      `1. "src": transcribe exactly what is said, in the original language (${ln}). Write only what is actually spoken. Leave out filler sounds such as えっと, あの, うーん, um, uh. Use normal punctuation.\n` +
+      `2. "zh": translate "src" into natural Simplified Chinese.\n` +
+      `If there is no clear speech in the audio, return empty strings for both.\n` +
+      (ctx ? `Earlier in the same conversation (for names and topic only; do not repeat it):\n${ctx}\n` : '') +
+      `Reply with JSON only: {"src": "...", "zh": "..."}`;
+  }
+  async function runGemini(job) {
+    const b64 = job.b64 || (job.b64 = await blobB64(wavBlob(job.pcm)));
+    const prompt = geminiPrompt(job);
+    let last = null;
+    for (const model of orderModels('g', G_MODELS)) {
+      if (cooling('g:' + model)) continue;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const think = attempt === 0 && !noThink[model];
+        const body = {
+          contents: [{ role: 'user', parts: [{ inline_data: { mime_type: 'audio/wav', data: b64 } }, { text: prompt }] }],
+          generationConfig: Object.assign({ temperature: 0, responseMimeType: 'application/json' }, think ? { thinkingConfig: { thinkingBudget: 0 } } : {})
+        };
+        try {
+          const j = await apiFetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(cfg.gKey)}`,
+            { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+          const c = j && j.candidates && j.candidates[0];
+          const txt = ((c && c.content && c.content.parts) || []).map(p => p.text || '').join('');
+          const out = parseJsonLoose(txt);
+          rememberModel('g', model);
+          return { src: clean(out.src || out.transcript || ''), zh: clean(out.zh || out.translation || ''), by: 'Gemini' };
+        } catch (err) {
+          last = err;
+          if (err.kind === 'bad' && think && /think/i.test(err.message)) { noThink[model] = true; continue; }
+          if (err.kind === 'key' || err.kind === 'blocked' || err.kind === 'net') throw err;
+          setModelState('g:' + model, err);
+          break;
+        }
+      }
+    }
+    throw last || new ApiErr('quota', '所有模型都在冷却');
+  }
+  async function runOpenAICompat(job, p) {
+    let last = null;
+    for (const model of orderModels(p.id, p.models)) {
+      if (cooling(p.id + ':' + model)) continue;
+      const fd = new FormData();
+      fd.append('file', wavBlob(job.pcm), 'audio.wav');
+      fd.append('model', model);
+      fd.append('language', job.lang === 'en' ? 'en' : 'ja');
+      if (p.id === 'q') {
+        fd.append('response_format', 'json');
+        fd.append('temperature', '0');
+        const ctx = recentContext(job.e).slice(-200);
+        if (ctx) fd.append('prompt', ctx);
+      }
+      try {
+        const j = await apiFetch(p.url, { method: 'POST', headers: { Authorization: 'Bearer ' + p.key() }, body: fd });
+        rememberModel(p.id, model);
+        return { src: clean(j && j.text), zh: '', by: p.name };
+      } catch (err) {
+        last = err;
+        if (err.kind === 'key' || err.kind === 'blocked' || err.kind === 'net') throw err;
+        setModelState(p.id + ':' + model, err);
+      }
+    }
+    throw last || new ApiErr('quota', '冷却中');
+  }
+  const PROV = [
+    { id: 'g', name: 'Gemini', key: () => cfg.gKey, models: G_MODELS, run: runGemini },
+    { id: 'q', name: 'Groq', key: () => cfg.qKey, models: ['whisper-large-v3', 'whisper-large-v3-turbo'], url: 'https://api.groq.com/openai/v1/audio/transcriptions' },
+    { id: 'm', name: 'Mistral', key: () => cfg.mKey, models: ['voxtral-mini-latest'], url: 'https://api.mistral.ai/v1/audio/transcriptions' }
+  ];
+  PROV.forEach(p => { if (!p.run) p.run = job => runOpenAICompat(job, p); });
+  const anyKey = () => PROV.some(p => p.key());
+  const provUsable = p => !!p.key() && !cooling(p.id) && p.models.some(m => !cooling(p.id + ':' + m));
+  const anyUsable = () => PROV.some(provUsable);
+  function provError(p, err) {
+    if (err.kind === 'key') { pstSet(p.id, 'key', Infinity); toast(p.name + ' 的 Key 无效，已跳过'); }
+    else if (err.kind === 'blocked') { pstSet(p.id, 'blocked', Date.now() + 6 * 3600e3); toast(p.name + ' 不允许网页直接调用，已跳过'); }
+    else if (err.kind === 'net') pstSet(p.id, 'net', Date.now() + 30000);
+    dl(`${p.name} ${err.kind}：${err.message.slice(0, 80)}`);
+    if ($('#llmBox') && !$('#llmBox').hidden) paintProv();
+  }
+  function provStatus(p) {
+    if (!p.key()) return '未填写';
+    const s = pst[p.id];
+    if (s && s.until > Date.now()) return { key: 'Key 无效', blocked: '被浏览器拦截，这个服务不允许网页直接调用', net: '连不上，稍后自动重试' }[s.why] || '暂停中';
+    const cool = p.models.map(m => pst[p.id + ':' + m]).filter(x => x && x.until > Date.now());
+    if (cool.length === p.models.length) {
+      if (cool.every(x => x.why === 'model' || x.why === 'bad')) return '没有能用的模型';
+      if (cool.some(x => x.why === 'day')) return '今天的免费额度用完了，明天自动恢复';
+      return `额度暂时用完，约 ${Math.max(1, Math.ceil((Math.min(...cool.map(x => x.until)) - Date.now()) / 1000))} 秒后恢复`;
+    }
+    return lastOkBy === p.name ? '可用 ✓ 正在使用' : '可用';
+  }
+  const HALLU = /ご視聴ありがとうございました|ご清聴ありがとうございました|チャンネル登録|thanks? for watching|字幕|subtitles by/i;
+
+  // one request at a time, in order, so the numbered lines fill in the order they were spoken
+  const jobs = []; let jobBusy = false;
+  function enqueue(job) { jobs.push(job); pumpJobs(); }
+  async function pumpJobs() {
+    if (jobBusy) return;
+    const job = jobs.shift(); if (!job) return;
+    jobBusy = true;
+    try { await runJob(job); } catch (e) { dl('处理出错：' + (e && e.message)); }
+    jobBusy = false;
+    pumpJobs();
+  }
+  async function runJob(job) {
+    const e = job.e;
+    let res = null;
+    for (const p of PROV) {
+      if (!provUsable(p)) continue;
+      try { res = await p.run(job); lastOkBy = p.name; break; }
+      catch (err) { provError(p, err); }
+    }
+    let fb = null;
+    const needFb = !res || !res.src || HALLU.test(res.src);
+    if (needFb) fb = await job.fallbackP;
+    if (res && res.src && HALLU.test(res.src) && !(fb && HALLU.test(fb))) { dl('疑似幻听，丢弃：' + res.src); res = { src: '', zh: '' }; }
+    if (!note.entries.includes(e)) return;
+    if (res && res.src) {
+      fallbackNoted = false;
+      e.src = res.src; e.by = res.by;
+      if (res.zh) { e.zh = res.zh; e.st = 'ok'; paint(e); save(); }
+      else { e.zh = ''; translateEntry(e); }
+      return;
+    }
+    if (!res && !fallbackNoted) { fallbackNoted = true; toast('大模型暂时用不了，先用手机识别'); }
+    if (fb) { e.src = fb; e.by = 'phone'; e.zh = ''; translateEntry(e); return; }
+    removeEntry(e);
+  }
+
+  async function cloudStart() {
+    const ok = await ensureSrStream();
+    if (!want) { releaseSrStream(); return; }
+    if (!ok || !capStart(srStream, 'vad')) { dl('大模型录音没打开，改用手机识别'); cloudOn = false; spawn(); return; }
+    cloudOn = true; previewDead = false; preview.text = ''; preview.interim = '';
+    if (SR && !trackBroken) spawn(); // live preview from the phone recognizer, fed from the same mic stream
+    paintCloudLive();
+  }
+  function cloudStop() {
+    if (!cloudOn) return;
+    if (cap.seg && cap.seg.voiced >= 12) cutSeg(); // what was being said when you stopped
+    cloudOn = false;
+    capStop();
+  }
+  async function pttCloudStart() {
+    const ok = await ensureSrStream();
+    if (!ptt || ptt.releasing) { if (!want && !ptt) releaseSrStream(); return; }
+    if (ok && capStart(srStream, 'hold')) ptt.cloud = true;
+    if (SR && !trackBroken) spawn();
   }
 
   /* ---------- Deepgram engine: the page records the mic itself and streams it ---------- */
@@ -797,7 +1174,9 @@ body.mini .fab { width: 42px; height: 42px; }
       if (sess) flush(sess);
       try { old.abort(); } catch (e) { }
     }
-    const mode = curMode();
+    const previewing = cloudOn || (ptt && ptt.cloud);
+    if (previewing && (previewDead || trackBroken)) return; // no live preview; the AI service still gets the audio
+    const mode = previewing ? { c: true, t: true, n: '预览' } : curMode();
     if (mode.t && !streamLive()) {
       if (!spawnWaiting) {
         spawnWaiting = true;
@@ -816,7 +1195,7 @@ body.mini .fab { width: 42px; height: 42px; }
     r.continuous = mode.c;
     r.interimResults = true;
     r.maxAlternatives = 1;
-    const s = { done: new Set(), fin: '', interim: '', pending: null, liveFor: '', heard: false, mode: modeIdx, ptt: !!ptt };
+    const s = { done: new Set(), fin: '', interim: '', pending: null, liveFor: '', heard: false, mode: modeIdx, ptt: !!ptt, preview: cloudOn && !ptt };
     dStarts++;
     dl(`启动#${dStarts} ${r.lang} ${mode.n}`);
     if (r.addEventListener) Object.keys(EVN).filter(n => n !== 'end').forEach(n => r.addEventListener(n, () => { if (rec === r) dl(EVN[n]); }));
@@ -857,6 +1236,7 @@ body.mini .fab { width: 42px; height: 42px; }
     s.fin = s.fin + ' ' + t;
     clearTimeout(stallT);
     if (s.ptt) { if (ptt) { ptt.text = combine(ptt.text, t, s.lang || cfg.lang); ptt.interim = ''; paintPtt(); } return; }
+    if (s.preview) { preview.text = combine(preview.text, t, cfg.lang); preview.interim = ''; paintCloudLive(); return; }
     if (s.pending) {
       const e = s.pending; s.pending = null;
       e.prov = false; e.ts = Date.now();
@@ -872,6 +1252,7 @@ body.mini .fab { width: 42px; height: 42px; }
     const changed = t !== s.interim;
     s.interim = t;
     if (s.ptt) { if (ptt) { ptt.interim = t; paintPtt(); } return; }
+    if (s.preview) { preview.interim = t; paintCloudLive(); return; }
     if (changed) {
       clearTimeout(stallT);
       if (t) stallT = setTimeout(() => stall(s), cfg.pause);
@@ -909,6 +1290,11 @@ body.mini .fab { width: 42px; height: 42px; }
       s.interim = '';
       return;
     }
+    if (s.preview) {
+      if (s.interim) { preview.text = combine(preview.text, s.interim, cfg.lang); preview.interim = ''; }
+      s.interim = '';
+      return;
+    }
     if (s.pending) {
       const e = s.pending; s.pending = null; e.prov = false;
       if (s.interim && norm(s.interim).length > norm(e.src).length) setEntrySrc(e, s.interim, false);
@@ -924,7 +1310,7 @@ body.mini .fab { width: 42px; height: 42px; }
     flush(s);
     rec = null;
     // until something has been recognized in this run, try the next mode after every two silent sessions
-    if (want && !s.ptt && !s.heard && !dHeardSinceStart) {
+    if (want && !s.ptt && !s.preview && !s.heard && !dHeardSinceStart) {
       silentEnds++;
       if (silentEnds % 2 === 0) { nextMode(); dl('换成模式：' + curMode().n); }
     }
@@ -932,6 +1318,7 @@ body.mini .fab { width: 42px; height: 42px; }
     if (document.hidden) { dl('页面在后台，等回到页面再继续'); return; } // Chrome stops recognition for hidden pages
     // a session that ends within 1.5 s without hearing anything is a failed start
     quickEnds = (!s.heard && Date.now() - startedAt < 1500) ? quickEnds + 1 : 0;
+    if ((s.preview || s.ptt && ptt && ptt.cloud) && quickEnds >= 6) { previewDead = true; dl('手机预览一直启动失败，只用大模型'); return; }
     if (quickEnds >= 8) { stop(); showBanner(explainFailure()); return; }
     restartT = setTimeout(spawn, quickEnds > 1 ? 1000 : 120);
   }
@@ -941,6 +1328,10 @@ body.mini .fab { width: 42px; height: 42px; }
     if (c !== 'aborted') lastErr = c;
     if (c === 'no-speech' || c === 'aborted' || document.hidden) return; // background errors are expected; it resumes on return
     if (c === 'network') { setNet(true); return; }
+    if (cloudOn || (ptt && ptt.cloud)) { // only the live preview is affected; the AI service keeps working
+      if (c !== 'network') { previewDead = true; dl('手机预览停用：' + c); }
+      return;
+    }
     const msg = {
       'not-allowed': '麦克风权限被拒绝了。点地址栏左边的图标 → 权限 → 麦克风 → 允许，然后再点 ✎。',
       'service-not-allowed': '手机上的语音识别服务用不了。请确认装了「Google」应用并更新到最新，并在系统设置的「语音输入」里选 Google，然后再试。',
@@ -1028,12 +1419,14 @@ body.mini .fab { width: 42px; height: 42px; }
   function pttStart() {
     if (ptt) return;
     if (!window.isSecureContext) { showBanner('需要用 https 开头的网址打开（例如 GitHub Pages），直接打开本地文件时用不了麦克风。'); return; }
-    if (cfg.engine === 'dg') {
+    if (cfg.engine === 'llm') {
+      if (!anyKey()) { paintSettings(); showSheet('#setSheet'); toast('先在这里填写至少一个大模型的 Key'); return; }
+    } else if (cfg.engine === 'dg') {
       if (!cfg.dgKey) { paintSettings(); showSheet('#setSheet'); toast('先在这里填写 Deepgram 的 Key'); return; }
     } else if (!SR) { showBanner('这个浏览器不能做语音识别，请用 Chrome 打开。'); return; }
     if (want) stop(); // switch off continuous translation; what it heard so far is kept
     if (rec) { const old = rec; rec = null; if (sess) flush(sess); try { old.abort(); } catch (e) { } }
-    ptt = { text: '', interim: '', releasing: false, t0: Date.now(), timer: 0, short: false };
+    ptt = { text: '', interim: '', releasing: false, t0: Date.now(), timer: 0, short: false, cloud: false, audio: null };
     want = true; quickEnds = 0; lastErr = ''; hideBanner();
     if (cfg.engine !== 'dg' && !actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { actx = null; } }
     if (actx && actx.state === 'suspended') actx.resume().catch(() => { });
@@ -1042,12 +1435,13 @@ body.mini .fab { width: 42px; height: 42px; }
     try { if (navigator.vibrate) navigator.vibrate(15); } catch (e) { }
     dl('按住说话 开始');
     updateMeta(); paintPtt();
-    if (cfg.engine === 'dg') dgStart(); else spawn();
+    if (cfg.engine === 'dg') dgStart(); else if (cfg.engine === 'llm') pttCloudStart(); else spawn();
   }
   function pttEnd() {
     if (!ptt || ptt.releasing) return;
     ptt.releasing = true;
     ptt.short = Date.now() - ptt.t0 < 600 && !ptt.text && !ptt.interim;
+    if (ptt.cloud) ptt.audio = endHold();
     want = false;
     clearTimeout(restartT); clearTimeout(stallT);
     document.body.classList.remove('ptt');
@@ -1065,12 +1459,17 @@ body.mini .fab { width: 42px; height: 42px; }
     if (!ptt) return;
     clearTimeout(ptt.timer);
     const text = clean(combine(ptt.text, ptt.interim, cfg.lang));
-    const short = ptt.short;
+    const short = ptt.short, audio = ptt.audio;
     ptt = null;
     if (rec) { const r = rec; rec = null; try { r.abort(); } catch (e) { } }
+    capStop();
     releaseSrStream();
     updateMeta(); updateLive();
-    if (text) { addEntry(text, false); follow(true); }
+    if (audio && audio.voiced >= 8 && anyUsable()) {
+      // show the phone's text right away; the AI service's version replaces it when it arrives
+      enqueue({ e: addPlaceholder(text), pcm: audio.pcm, lang: cfg.lang, fallbackP: Promise.resolve(text) });
+      follow(true);
+    } else if (text) { addEntry(text, false); follow(true); }
     else toast(short ? '要按住不放，等对方说完再松开' : '这一段没有听到内容');
   }
   (() => {
@@ -1123,7 +1522,7 @@ body.mini .fab { width: 42px; height: 42px; }
     g.fillStyle = '#17150F'; g.fillRect(0, 0, W, H);
     const last = note.entries[note.entries.length - 1];
     const holding = !!ptt;
-    const liveText = ptt ? combine(ptt.text, ptt.interim, cfg.lang) : (want && sess && !sess.pending ? sess.interim : '');
+    const liveText = ptt ? combine(ptt.text, ptt.interim, cfg.lang) : cloudOn ? combine(preview.text, preview.interim, cfg.lang) : (want && sess && !sess.pending ? sess.interim : '');
     // header: number + state
     g.textBaseline = 'top';
     g.font = `600 26px ${PIP_FONT}`; g.fillStyle = '#E2A43A';
@@ -1230,10 +1629,14 @@ body.mini .fab { width: 42px; height: 42px; }
     document.documentElement.style.setProperty('--fs', { s: '15px', m: '17px', l: '20px' }[cfg.size] || '17px');
     document.querySelectorAll('#segEngine button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === cfg.engine)));
     $('#keyBox').hidden = cfg.engine !== 'dg';
+    $('#llmBox').hidden = cfg.engine !== 'llm';
+    PROV.forEach(p => { const i = $('#key' + p.id); if (document.activeElement !== i) i.value = p.key() || ''; });
+    $('#swLlmCont').setAttribute('aria-checked', String(!!cfg.llmCont));
+    paintProv();
     const ki = $('#dgKey');
     if (document.activeElement !== ki) ki.value = cfg.dgKey || '';
     paintKeyHint();
-    $('#diag').textContent = '版本 ' + VERSION + ' · ' + (cfg.engine === 'dg' ? 'Deepgram' : '手机自带识别') + ' · 浏览器：' + BROWSER;
+    $('#diag').textContent = '版本 ' + VERSION + ' · ' + engineName() + ' · 浏览器：' + BROWSER;
     $('.diagbox').hidden = cfg.engine === 'dg';
     $('#diagLog').textContent = dlog.length ? '诊断记录：\n' + dlog.slice(-25).join('\n') : '';
   }
@@ -1286,9 +1689,50 @@ body.mini .fab { width: 42px; height: 42px; }
     if (!b || b.dataset.v === cfg.engine) return;
     const wasOn = want;
     if (wasOn) stop();
-    cfg.engine = b.dataset.v === 'dg' ? 'dg' : 'chrome';
+    cfg.engine = b.dataset.v === 'dg' ? 'dg' : b.dataset.v === 'llm' ? 'llm' : 'chrome';
     saveCfg(); paintSettings(); hideBanner();
     toast(wasOn ? '已切换识别方式，点 ✎ 重新开始' : '已切换识别方式');
+  });
+  function paintProv() {
+    PROV.forEach(p => {
+      const el = $('#st' + p.id); if (!el) return;
+      const t = provStatus(p);
+      el.textContent = t;
+      el.className = 'pst' + (/^可用/.test(t) ? ' ok' : /无效|拦截|没有能用/.test(t) ? ' bad' : '');
+    });
+  }
+  setInterval(() => { if (openSheet === $('#setSheet') && !$('#llmBox').hidden) paintProv(); }, 1000);
+  PROV.forEach(p => {
+    $('#key' + p.id).addEventListener('input', e => {
+      cfg[p.id + 'Key'] = e.target.value.replace(/\s+/g, '');
+      Object.keys(pst).forEach(k => { if (k === p.id || k.startsWith(p.id + ':')) delete pst[k]; }); // a new key gets a fresh start
+      store.set('bijiyi.pst', pst);
+      saveCfg(); paintProv();
+    });
+  });
+  $('#swLlmCont').addEventListener('click', () => {
+    cfg.llmCont = !cfg.llmCont; saveCfg(); paintSettings();
+    if (want) toast('点 ✎ 重新开始后生效');
+  });
+  // send one second of near-silence to every service that has a key, and report what came back
+  $('#btnTestKeys').addEventListener('click', async () => {
+    const btn = $('#btnTestKeys'), out = $('#testKeysOut');
+    const list = PROV.filter(p => p.key());
+    if (!list.length) { out.textContent = '还没有填写任何 Key。'; return; }
+    btn.disabled = true; out.textContent = '正在检查…';
+    const pcm = new Int16Array(SR16); for (let i = 0; i < pcm.length; i++) pcm[i] = (Math.random() - 0.5) * 60;
+    const lines = [];
+    for (const p of list) {
+      Object.keys(pst).forEach(k => { if ((k === p.id || k.startsWith(p.id + ':')) && pst[k].why !== 'day') delete pst[k]; });
+      try { await p.run({ pcm, lang: cfg.lang, e: null }); lines.push(`${p.name}：可以用 ✓`); lastOkBy = lastOkBy || p.name; }
+      catch (err) {
+        if (err.kind === 'key' || err.kind === 'blocked' || err.kind === 'net') provError(p, err);
+        lines.push(`${p.name}：${{ key: 'Key 无效', blocked: '被浏览器拦截，不能在网页里用', net: '连不上网络', quota: '额度暂时用完', day: '今天的额度用完了', model: '没有能用的模型', bad: '请求被拒绝', server: '服务器出错，稍后再试' }[err.kind] || err.kind}`);
+      }
+      out.textContent = lines.join('\n');
+    }
+    store.set('bijiyi.pst', pst);
+    btn.disabled = false; paintProv();
   });
   $('#dgKey').addEventListener('input', e => {
     cfg.dgKey = e.target.value.replace(/\s+/g, '');
