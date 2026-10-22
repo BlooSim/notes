@@ -145,6 +145,14 @@ body.rec .fab .i-pause { display: block; }
 .sw::after { content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 11px; background: #fff; transition: transform .2s; box-shadow: 0 1px 2px rgba(0,0,0,.2); }
 .sw[aria-checked="true"] { background: var(--accent); }
 .sw[aria-checked="true"]::after { transform: translateX(18px); }
+.keybox { padding: 12px 0; border-bottom: 1px solid var(--rule); display: flex; flex-direction: column; gap: 8px; font-size: 14px; color: var(--muted); }
+.keybox input { width: 100%; font: inherit; font-size: 15px; color: var(--ink); background: var(--paper); border: 1px solid var(--rule); border-radius: 9px; padding: 9px 10px; }
+.keybox .hint { margin: 0; }
+.keybox a { color: var(--accent-ink); }
+.diagline { font-size: 12px !important; }
+.diagbox .acts { margin-top: 10px; }
+.diagbox #testOut { color: var(--ink); }
+.diaglog { margin-top: 8px; font: 12px/1.6 ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow-y: auto; }
 .acts { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; }
 .btn { padding: 9px 16px; border-radius: 10px; border: 1px solid var(--rule); background: var(--paper); font-size: 14px; }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
@@ -195,7 +203,7 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     <ol class="list" id="list"></ol>
     <div class="ent live" id="live" hidden aria-live="polite">
       <span class="no" id="liveNo"></span>
-      <div class="tx"><p class="zh" id="liveZh"></p><p class="src" id="liveSrc"></p></div>
+      <div class="tx"><p class="zh" id="liveZh"></p><p class="src" id="liveSrc"></p><p class="src diagline" id="liveDiag" hidden></p></div>
     </div>
   </div>
 </main>
@@ -215,6 +223,12 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
   <div class="sheet-in">
     <div class="grab"></div>
     <div class="shead"><h2>设置</h2></div>
+    <div class="row"><span>识别方式</span><div class="seg" id="segEngine"><button data-v="chrome">手机自带</button><button data-v="dg">Deepgram</button></div></div>
+    <div class="keybox" id="keyBox" hidden>
+      <label for="dgKey">Deepgram API Key</label>
+      <input id="dgKey" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="把 Key 粘贴到这里">
+      <p class="hint" id="keyHint"></p>
+    </div>
     <div class="row"><span>对方说的语言</span><div class="seg" id="segLang"><button data-v="ja">日语</button><button data-v="en">英语</button></div></div>
     <div class="row"><span>停顿多久算一句</span><div class="seg" id="segPause"><button data-v="800">短</button><button data-v="1300">中</button><button data-v="2000">长</button></div></div>
     <div class="row"><span>边听边预览翻译</span><button class="sw" id="swLive" role="switch" aria-label="边听边预览翻译"></button></div>
@@ -225,6 +239,11 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
       <button class="btn" id="btnNew">新建笔记</button>
     </div>
     <p class="hint" id="diag"></p>
+    <div class="diagbox">
+      <div class="acts"><button class="btn" id="btnTestJa">日语识别测试</button><button class="btn" id="btnTestZh">中文识别测试</button></div>
+      <p class="hint" id="testOut">识别没反应时，点一个测试按钮，然后说一句对应语言的话。</p>
+      <div class="diaglog" id="diagLog"></div>
+    </div>
     <p class="hint">「停顿多久算一句」：对方说话慢、句子被切碎时调长；想更快出译文时调短。<br>语音识别和翻译由 Google 完成，需要联网。笔记只保存在这台手机的浏览器里。</p>
   </div>
 </section>
@@ -252,8 +271,9 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch (e) { return false; } }
   };
   const K = { notes: 'bijiyi.notes.v1', cur: 'bijiyi.cur.v1', cfg: 'bijiyi.cfg.v1' };
-  const cfg = Object.assign({ lang: 'ja', pause: 1300, live: true, src: true, size: 'm' }, store.get(K.cfg, {}));
+  const cfg = Object.assign({ lang: 'ja', pause: 1300, live: true, src: true, size: 'm', engine: 'chrome', dgKey: '' }, store.get(K.cfg, {}));
   if (!LANGS[cfg.lang]) cfg.lang = 'ja';
+  if (cfg.engine !== 'dg') cfg.engine = 'chrome';
   let notes = store.get(K.notes, []);
   if (!Array.isArray(notes)) notes = [];
   notes = notes.filter(n => n && Array.isArray(n.entries));
@@ -442,7 +462,26 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     return t.slice(i).trim();
   }
 
-  const VERSION = 'v2';
+  const VERSION = 'v4';
+
+  /* ---------- diagnostics: what the recognition service actually does ---------- */
+  const dlog = [];
+  let dStarts = 0, dHeardSinceStart = false, listenSince = 0, hintTimer = 0, silentEnds = 0, compat = false;
+  const EVN = { start: '开始', audiostart: '麦克风打开', soundstart: '有声音', speechstart: '有说话声', speechend: '说话结束', soundend: '声音结束', audioend: '麦克风关闭', nomatch: '听到但没认出', end: '结束' };
+  function dl(ev) {
+    const d = new Date();
+    dlog.push(`${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())} ${ev}`);
+    if (dlog.length > 60) dlog.shift();
+    const box = document.getElementById('diagLog');
+    if (box && !box.closest('[hidden]')) box.textContent = dlog.slice(-25).join('\n');
+  }
+  function recentEvents() { return dlog.slice(-4).map(x => x.slice(9)).join(' → '); }
+  function paintHint() {
+    const el = $('#liveDiag');
+    const show = want && cfg.engine !== 'dg' && !dHeardSinceStart && Date.now() - listenSince > 6000;
+    el.hidden = !show;
+    if (show) el.textContent = `还没收到识别结果 · 已启动 ${dStarts} 次${compat ? ' · 单句模式' : ''} · 最近：${recentEvents()}`;
+  }
   let lastErr = '';
   function browserName() {
     const ua = navigator.userAgent;
@@ -458,32 +497,144 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
   const BROWSER = browserName();
   const isChrome = /^Chrome /.test(BROWSER);
   const errNames = { network: '连不上语音识别服务器', 'service-not-allowed': '语音服务不可用', 'not-allowed': '没有麦克风权限', 'audio-capture': '麦克风被占用', 'no-speech': '没听到声音' };
-  function diagLine() { return `（${VERSION} · 浏览器：${BROWSER}${lastErr ? ' · 错误：' + lastErr : ''}）`; }
+  function diagLine() { return `（${VERSION} · ${cfg.engine === 'dg' ? 'Deepgram' : '手机自带识别'} · 浏览器：${BROWSER}${lastErr ? ' · 错误：' + lastErr : ''}）`; }
+  const SWITCH_TIP = '\n\n手机自带的识别如果一直用不了，可以在右上角 ⋯ 设置里把「识别方式」换成 Deepgram，它不依赖手机上的 Google 服务。';
   function explainFailure() {
+    if (cfg.engine === 'dg') return `连不上 Deepgram。可能是 Key 填错了、额度用完了，或者网络有问题。请在右上角 ⋯ 设置里检查 Key。\n${diagLine()}`;
     if (!isChrome) return `你现在用的是「${BROWSER}」，它的语音识别用不了。请复制下面的网址，用 Chrome 打开：\n${location.href.split('#')[0]}\n${diagLine()}`;
-    if (lastErr === 'network' || !lastErr) return 'Chrome 的语音识别连不上 Google 服务，所以一直被中断。请检查：\n① 手机里装了「Google」应用（Play 商店搜 Google），并更新到最新；\n② 系统设置里已开启谷歌基础服务（设置里搜「谷歌」或「Google」）；\n③ 当前网络能正常打开 google.com。\n' + diagLine();
-    return `语音识别一直启动失败（${errNames[lastErr] || lastErr}）。\n${diagLine()}`;
+    if (lastErr === 'network' || !lastErr) return 'Chrome 调用不到手机上的 Google 语音服务，所以一直被中断。' + SWITCH_TIP + '\n' + diagLine();
+    return `语音识别一直启动失败（${errNames[lastErr] || lastErr}）。${SWITCH_TIP}\n${diagLine()}`;
   }
 
   function start() {
-    if (!SR) { showBanner(isChrome ? '这个浏览器不能做语音识别。请把 Chrome 更新到最新版。' : `你现在用的是「${BROWSER}」，不能做语音识别。请复制网址，用 Chrome 打开。`); return; }
     if (!window.isSecureContext) { showBanner('需要用 https 开头的网址打开（例如 GitHub Pages），直接打开本地文件时用不了麦克风。'); return; }
+    if (cfg.engine === 'dg') {
+      if (!cfg.dgKey) { paintSettings(); showSheet('#setSheet'); toast('先在这里填写 Deepgram 的 Key'); return; }
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder || !window.WebSocket) { showBanner('这个浏览器不支持网页录音，请用 Chrome 打开。'); return; }
+    } else if (!SR) {
+      showBanner((isChrome ? '这个浏览器不能做语音识别。请把 Chrome 更新到最新版。' : `你现在用的是「${BROWSER}」，不能做语音识别。请复制网址，用 Chrome 打开。`) + SWITCH_TIP);
+      return;
+    }
     want = true; quickEnds = 0; lastErr = ''; hideBanner();
+    dHeardSinceStart = false; listenSince = Date.now(); silentEnds = 0;
+    clearInterval(hintTimer); hintTimer = setInterval(paintHint, 1000);
     document.body.classList.add('rec');
     $('#btnRec').setAttribute('aria-label', '暂停');
     updateMeta(); updateLive();
     follow(true);
     keepAwake();
-    spawn();
+    if (cfg.engine === 'dg') dgStart(); else spawn();
   }
   function stop() {
     want = false;
     clearTimeout(restartT); clearTimeout(stallT); clearTimeout(liveTimer); liveTimer = 0;
+    clearInterval(hintTimer); hintTimer = 0; paintHint();
     document.body.classList.remove('rec');
     $('#btnRec').setAttribute('aria-label', '开始');
     if (rec) { try { rec.stop(); } catch (e) { } }
+    dgStop();
     updateMeta(); updateLive();
     releaseAwake();
+  }
+  function restartEngine() {
+    if (!want) return;
+    quickEnds = 0;
+    if (cfg.engine === 'dg') dgConnect(); else spawn();
+  }
+
+  /* ---------- Deepgram engine: the page records the mic itself and streams it ---------- */
+  const DG_MIME = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4']
+    .find(t => window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) || '';
+  let dgStream = null, dgWs = null, dgModel = 'nova-3';
+  async function dgStart() {
+    if (!dgStream) {
+      try {
+        dgStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+      } catch (e) {
+        lastErr = e && e.name || 'mic';
+        stop();
+        showBanner((lastErr === 'NotAllowedError' ? '麦克风权限被拒绝了。点地址栏左边的图标 → 权限 → 麦克风 → 允许，然后再点 ✎。' : '打不开麦克风，可能被别的应用占用了。') + '\n' + diagLine());
+        return;
+      }
+    }
+    if (!want) { dgRelease(); return; }
+    dgConnect();
+  }
+  function dgRelease() {
+    if (dgStream) { dgStream.getTracks().forEach(t => t.stop()); dgStream = null; }
+  }
+  const joinText = (a, b, lang) => !a ? b : !b ? a : (lang === 'en' ? a + ' ' + b : a + b);
+  function dgConnect() {
+    clearTimeout(restartT);
+    if (!want || !dgStream) return;
+    if (dgWs) { const old = dgWs; dgWs = null; dgClose(old); }
+    const lang = cfg.lang;
+    const params = new URLSearchParams({
+      model: dgModel, language: lang, interim_results: 'true', punctuate: 'true',
+      endpointing: String({ 800: 300, 1300: 500, 2000: 900 }[cfg.pause] || 500),
+      utterance_end_ms: String(Math.max(1000, cfg.pause))
+    });
+    let ws;
+    try { ws = new WebSocket('wss://api.deepgram.com/v1/listen?' + params, ['token', cfg.dgKey]); }
+    catch (e) { lastErr = 'ws'; stop(); showBanner(explainFailure()); return; }
+    const s = { done: new Set(), fin: '', interim: '', pending: null, liveFor: '', heard: false, buf: '', lang, t0: Date.now(), mr: null };
+    ws._s = s;
+    dgWs = ws; sess = s;
+    ws.onopen = () => {
+      if (dgWs !== ws || !dgStream) return;
+      try {
+        const mr = DG_MIME ? new MediaRecorder(dgStream, { mimeType: DG_MIME }) : new MediaRecorder(dgStream);
+        mr.ondataavailable = e => { if (e.data && e.data.size && ws.readyState === 1) ws.send(e.data); };
+        mr.start(250);
+        s.mr = mr;
+      } catch (e) { lastErr = 'recorder'; stop(); showBanner('这个浏览器录不了音（' + (e && e.name) + '）。\n' + diagLine()); }
+    };
+    ws.onmessage = ev => {
+      let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+      if (m.type === 'Results') {
+        s.heard = true; quickEnds = 0; lastErr = ''; setNet(false);
+        const alt = m.channel && m.channel.alternatives && m.channel.alternatives[0];
+        const t = clean(alt && alt.transcript);
+        if (m.is_final) {
+          if (t) s.buf = joinText(s.buf, t, s.lang);
+          if (m.speech_final) dgCommit(s); else setInterim(s, s.buf);
+        } else setInterim(s, joinText(s.buf, t, s.lang));
+      } else if (m.type === 'UtteranceEnd') dgCommit(s);
+    };
+    ws.onclose = ev => {
+      if (s.mr && s.mr.state !== 'inactive') { try { s.mr.stop(); } catch (e) { } }
+      dgCommit(s); flush(s);
+      if (dgWs !== ws) return;
+      dgWs = null;
+      if (!want) { dgRelease(); return; }
+      if (document.hidden) return; // reconnects when the page is visible again
+      if (!s.heard && Date.now() - s.t0 < 4000) {
+        quickEnds++;
+        lastErr = 'close ' + ev.code;
+        if (quickEnds === 2 && dgModel === 'nova-3') dgModel = 'nova-2'; // older model as a fallback
+        if (quickEnds >= 3) { stop(); showBanner(explainFailure()); return; }
+      } else quickEnds = 0;
+      restartT = setTimeout(dgConnect, quickEnds ? 1200 : 250);
+    };
+  }
+  function dgCommit(s) {
+    const t = s.buf; s.buf = '';
+    if (t) { gotFinal(s, t); s.fin = ''; }
+    else if (s.pending) { const e = s.pending; s.pending = null; e.prov = false; paint(e); save(); }
+    setInterim(s, '');
+  }
+  function dgClose(ws) {
+    const s = ws._s;
+    if (s && s.mr && s.mr.state !== 'inactive') { try { s.mr.stop(); } catch (e) { } }
+    setTimeout(() => {
+      try { if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'CloseStream' })); } catch (e) { }
+      setTimeout(() => { try { ws.close(); } catch (e) { } }, 1500);
+    }, 300);
+  }
+  function dgStop() {
+    clearTimeout(restartT);
+    if (dgWs) dgClose(dgWs); // onclose commits what is left and releases the mic
+    else dgRelease();
   }
   function spawn() {
     clearTimeout(restartT);
@@ -495,10 +646,14 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     }
     const r = new SR();
     r.lang = LANGS[cfg.lang].rec;
-    r.continuous = true;
+    // Some phones never return results in continuous mode; after two silent sessions, try one-sentence-per-session mode
+    r.continuous = !compat;
     r.interimResults = true;
     r.maxAlternatives = 1;
     const s = { done: new Set(), fin: '', interim: '', pending: null, liveFor: '', heard: false };
+    dStarts++;
+    dl(`启动#${dStarts} ${r.lang}${compat ? ' 单句模式' : ''}`);
+    if (r.addEventListener) Object.keys(EVN).filter(n => n !== 'end').forEach(n => r.addEventListener(n, () => { if (rec === r) dl(EVN[n]); }));
     r.onresult = ev => { if (rec === r) onResult(ev, s); };
     r.onerror = ev => { if (rec === r) onError(ev); };
     r.onend = () => { if (rec === r) onEnd(s); };
@@ -507,7 +662,9 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     catch (e) { rec = null; restartT = setTimeout(spawn, 700); }
   }
   function onResult(ev, s) {
+    if (!s.heard) { const r0 = ev.results[ev.resultIndex]; dl('收到结果：' + ((r0 && r0[0] && r0[0].transcript) || '').slice(0, 14)); }
     s.heard = true; quickEnds = 0; lastErr = ''; setNet(false);
+    dHeardSinceStart = true; silentEnds = 0; paintHint();
     let interim = '';
     for (let i = ev.resultIndex; i < ev.results.length; i++) {
       const res = ev.results[i];
@@ -576,8 +733,14 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     updateLive();
   }
   function onEnd(s) {
+    dl(EVN.end);
     flush(s);
     rec = null;
+    if (want && !s.heard) {
+      silentEnds++;
+      const next = silentEnds % 4 >= 2; // alternate the two modes every two silent sessions
+      if (next !== compat) { compat = next; dl(compat ? '换成单句模式' : '换回连续模式'); }
+    }
     if (!want) { updateMeta(); updateLive(); return; }
     if (document.hidden) return; // resumes when the page is visible again
     // a session that ends within 1.5 s without hearing anything is a failed start
@@ -587,6 +750,7 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
   }
   function onError(ev) {
     const c = ev.error;
+    dl('错误：' + c + (ev.message ? ' ' + ev.message : ''));
     if (c !== 'aborted') lastErr = c;
     if (c === 'no-speech' || c === 'aborted' || document.hidden) return;
     if (c === 'network') { setNet(true); return; }
@@ -637,7 +801,14 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
   function releaseAwake() { try { if (wakeLock) wakeLock.release(); } catch (e) { } wakeLock = null; }
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') {
-      if (want) { keepAwake(); quickEnds = 0; if (!rec) spawn(); }
+      if (want) {
+        keepAwake(); quickEnds = 0;
+        if (cfg.engine !== 'dg') { if (!rec) spawn(); }
+        else if (!dgWs) {
+          if (dgStream && dgStream.getAudioTracks().some(t => t.readyState === 'live')) dgConnect();
+          else { dgRelease(); dgStart(); }
+        }
+      }
     } else save(true);
   });
   window.addEventListener('pagehide', () => save(true));
@@ -654,7 +825,7 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     if (!LANGS[v] || v === cfg.lang) return;
     cfg.lang = v; saveCfg(); paintLang();
     toast('对方的语言：' + LANGS[v].name);
-    if (want) { quickEnds = 0; spawn(); }
+    restartEngine();
   }
   $('#btnLang').addEventListener('click', () => setLang(cfg.lang === 'ja' ? 'en' : 'ja'));
 
@@ -666,7 +837,69 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     $('#swSrc').setAttribute('aria-checked', String(!!cfg.src));
     document.body.classList.toggle('nosrc', !cfg.src);
     document.documentElement.style.setProperty('--fs', { s: '15px', m: '17px', l: '20px' }[cfg.size] || '17px');
+    document.querySelectorAll('#segEngine button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === cfg.engine)));
+    $('#keyBox').hidden = cfg.engine !== 'dg';
+    const ki = $('#dgKey');
+    if (document.activeElement !== ki) ki.value = cfg.dgKey || '';
+    paintKeyHint();
+    $('#diag').textContent = '版本 ' + VERSION + ' · ' + (cfg.engine === 'dg' ? 'Deepgram' : '手机自带识别') + ' · 浏览器：' + BROWSER;
+    $('.diagbox').hidden = cfg.engine === 'dg';
+    $('#diagLog').textContent = dlog.length ? '诊断记录：\n' + dlog.slice(-25).join('\n') : '';
   }
+
+  // One-off recognition test in a chosen language, to tell "service broken" from "language missing"
+  let testRec = null;
+  function runTest(lang, label) {
+    const out = $('#testOut');
+    if (!SR) { out.textContent = '这个浏览器没有语音识别功能。'; return; }
+    if (want) stop();
+    if (testRec) { try { testRec.abort(); } catch (e) { } }
+    const r = testRec = new SR();
+    r.lang = lang; r.continuous = false; r.interimResults = true; r.maxAlternatives = 1;
+    let got = '';
+    out.textContent = `请现在说一句${label}…`;
+    dl(`${label}测试开始 ${lang}`);
+    if (r.addEventListener) Object.keys(EVN).filter(n => n !== 'end').forEach(n => r.addEventListener(n, () => dl(`测试 ${EVN[n]}`)));
+    r.onresult = ev => {
+      got = '';
+      for (let i = 0; i < ev.results.length; i++) got += ev.results[i][0].transcript;
+      out.textContent = `识别到（${label}）：${got}`;
+    };
+    r.onerror = ev => { dl('测试 错误：' + ev.error); if (!got) out.textContent = `${label}测试出错：${ev.error}`; };
+    r.onend = () => {
+      dl(`测试 结束${got ? '：' + got.slice(0, 14) : '，没有结果'}`);
+      if (!got && !/出错/.test(out.textContent)) out.textContent = `${label}测试结束，没有识别到任何内容。`;
+      paintSettings();
+    };
+    try { r.start(); } catch (e) { out.textContent = '启动失败：' + e.message; }
+  }
+  $('#btnTestJa').addEventListener('click', () => runTest('ja-JP', '日语'));
+  $('#btnTestZh').addEventListener('click', () => runTest('zh-CN', '中文'));
+  function paintKeyHint() {
+    const h = $('#keyHint');
+    h.textContent = '';
+    const k = cfg.dgKey;
+    h.append(k ? `已保存（结尾 …${k.slice(-4)}）。` : '还没有 Key？');
+    if (!k) {
+      const a = document.createElement('a');
+      a.href = 'https://console.deepgram.com/signup'; a.target = '_blank'; a.rel = 'noopener'; a.textContent = '免费注册 Deepgram';
+      h.append(a, '，注册后创建一个 API Key 粘贴到上面。');
+    }
+    h.append('Key 只保存在这台手机的浏览器里。');
+  }
+  $('#segEngine').addEventListener('click', e => {
+    const b = e.target.closest('button');
+    if (!b || b.dataset.v === cfg.engine) return;
+    const wasOn = want;
+    if (wasOn) stop();
+    cfg.engine = b.dataset.v === 'dg' ? 'dg' : 'chrome';
+    saveCfg(); paintSettings(); hideBanner();
+    toast(wasOn ? '已切换识别方式，点 ✎ 重新开始' : '已切换识别方式');
+  });
+  $('#dgKey').addEventListener('input', e => {
+    cfg.dgKey = e.target.value.replace(/\s+/g, '');
+    saveCfg(); paintKeyHint();
+  });
   $('#segLang').addEventListener('click', e => { const b = e.target.closest('button'); if (b) setLang(b.dataset.v); });
   $('#segPause').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; cfg.pause = Number(b.dataset.v); saveCfg(); paintSettings(); });
   $('#segSize').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; cfg.size = b.dataset.v; saveCfg(); paintSettings(); });
@@ -796,9 +1029,8 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
   // boot
   paintSettings();
   renderNote();
-  $('#diag').textContent = '版本 ' + VERSION + ' · 浏览器：' + BROWSER + ' · 语音识别：' + (SR ? '有' : '没有');
   if (!isChrome) showBanner(`你现在用的是「${BROWSER}」，语音识别多半用不了。请复制下面的网址，用 Chrome 打开：\n${location.href.split('#')[0]}`);
-  else if (!SR) showBanner('这个 Chrome 不能做语音识别，请更新到最新版。');
+  else if (cfg.engine !== 'dg' && !SR) showBanner('这个 Chrome 不能做语音识别，请更新到最新版。' + SWITCH_TIP);
   else if (!window.isSecureContext) showBanner('需要用 https 开头的网址打开（例如 GitHub Pages），直接打开本地文件时用不了麦克风。');
 })();
 </script>
