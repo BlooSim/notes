@@ -82,6 +82,11 @@ main {
   padding-block: 6px calc(150px + env(safe-area-inset-bottom, 0px));
 }
 .col { max-width: 680px; margin: 0 auto; }
+.go { width: 100%; display: flex; align-items: center; justify-content: center; gap: 10px; margin: 14px 0 4px;
+  padding: 16px 18px; border-radius: 16px; background: var(--accent); color: var(--on-accent);
+  font-size: 17px; font-weight: 600; box-shadow: var(--shadow); }
+.go:active { filter: brightness(.94); }
+.go .sub { display: block; font-size: 12px; font-weight: 400; opacity: .85; margin-top: 2px; }
 .empty { color: var(--muted); font-size: 15px; line-height: 1.75; padding-top: 18px; }
 .empty p { margin: 0 0 10px; }
 .empty b { color: var(--ink); font-weight: 600; }
@@ -183,7 +188,7 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
 .ndel.armed { color: var(--danger); font-weight: 600; }
 
 /* small window (system floating window or split screen): only the latest segment, large */
-body.mini .bar, body.mini .empty, body.mini #btnPip, body.mini .chip, body.mini .jump { display: none !important; }
+body.mini .bar, body.mini .empty, body.mini #btnPip, body.mini .chip, body.mini .jump, body.mini .go { display: none !important; }
 body.mini main { padding-block: 10px calc(70px + env(safe-area-inset-bottom, 0px)); }
 body.mini ol.list > li:not(:last-child) { display: none; }
 body.mini .ent { font-size: calc(var(--fs) + 3px); }
@@ -222,8 +227,12 @@ body.mini .fab { width: 42px; height: 42px; }
 <main>
   <div class="col">
     <div class="banner" id="banner" hidden><p id="bannerTxt"></p><button id="bannerX">关闭</button></div>
+    <button class="go" id="btnGo" hidden>
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg>
+      <span><span id="goTxt">开始听写</span><span class="sub" id="goSub">同时打开浮窗字幕</span></span>
+    </button>
     <div class="empty" id="empty">
-      <p>点右下角的 <b>✎</b> 开始。</p>
+      <p>点上面的大按钮开始，或者点右下角的 <b>✎</b>（不打开浮窗）。</p>
       <p>对方每说完一句、稍微停顿时，这里就会多一条<b>带编号的中文</b>，下面的小字是原文。</p>
       <p>也可以<b>按住「按住」按钮</b>：对方开始说话时按下，说完松开，这一整段会变成一条翻译。</p>
       <p>右下角的「日 / EN」切换对方说的语言。屏幕会保持常亮，手机放桌上离对方近一点更准。</p>
@@ -404,6 +413,17 @@ body.mini .fab { width: 42px; height: 42px; }
     const c = note.entries.length;
     $('#metaTxt').textContent = (c ? c + ' 条' : '空白笔记') + (want ? ' · 记录中' : '');
     $('#empty').hidden = c > 0 || want;
+    paintGo();
+  }
+  // one tap does the whole startup: start listening and open the floating captions
+  function paintGo() {
+    const b = $('#btnGo');
+    if (!b) return;
+    const show = !want || !pipOn;
+    b.hidden = !show;
+    if (!show) return;
+    $('#goTxt').textContent = want ? '打开浮窗字幕' : '开始听写';
+    $('#goSub').textContent = want ? '正在听写中' : (pipOn ? '浮窗已打开' : '同时打开浮窗字幕');
   }
   function nextNo() { const l = note.entries[note.entries.length - 1]; return l ? l.n + 1 : 1; }
   function updateLive(src, zh) {
@@ -1564,10 +1584,12 @@ body.mini .fab { width: 42px; height: 42px; }
     clearInterval(pipLoop);
     pipLoop = setInterval(drawPip, 400); // keeps frames flowing even when the page is in the background
     document.body.classList.add('pipon');
+    paintGo();
   }
   function stopPip() {
     pipOn = false; clearInterval(pipLoop); pipLoop = 0;
     document.body.classList.remove('pipon');
+    paintGo();
     try { pipVideo.pause(); } catch (e) { }
   }
   function pipTip() {
@@ -1602,6 +1624,11 @@ body.mini .fab { width: 42px; height: 42px; }
     if (!document.fullscreenElement && !document.pictureInPictureElement && pipOn) stopPip();
   });
   $('#btnPip').addEventListener('click', openPip);
+  $('#btnGo').addEventListener('click', () => {
+    if (!pipOn) openPip(); // first, while the tap still counts as a user gesture
+    if (!want) start();
+    paintGo();
+  });
 
   /* ---------- UI ---------- */
   $('#btnRec').addEventListener('click', () => { if (ptt) return; want ? stop() : start(); });
@@ -1860,7 +1887,14 @@ body.mini .fab { width: 42px; height: 42px; }
         icons: [{ src: i192, sizes: '192x192', type: 'image/png' }, { src: i512, sizes: '512x512', type: 'image/png' }] };
       const add = (rel, h) => { const l = document.createElement('link'); l.rel = rel; l.href = h; document.head.appendChild(l); };
       add('icon', i192); add('apple-touch-icon', i192);
-      if (/^https?:/.test(location.protocol)) add('manifest', 'data:application/manifest+json,' + encodeURIComponent(JSON.stringify(m)));
+      // a manifest served from this site (a data: URL does not make Chrome install it properly)
+      if (/^https?:/.test(location.protocol)) add('manifest', 'manifest.webmanifest');
+      void m;
+    } catch (e) { }
+    try {
+      if (location.protocol === 'https:' && navigator.serviceWorker) {
+        window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => { }));
+      }
     } catch (e) { }
   })();
 
@@ -1868,6 +1902,17 @@ body.mini .fab { width: 42px; height: 42px; }
   paintSettings();
   renderNote();
   checkMini();
+  paintGo();
+  // Opened from the home-screen icon: begin listening straight away, but only when the microphone
+  // was already allowed — asking without a tap would get the request refused for good.
+  (function autoStart() {
+    const fromIcon = /[?&]app=1/.test(location.search) ||
+      (window.matchMedia && matchMedia('(display-mode: standalone)').matches);
+    if (!fromIcon || !window.isSecureContext || !navigator.permissions || !navigator.permissions.query) return;
+    navigator.permissions.query({ name: 'microphone' })
+      .then(st => { if (st && st.state === 'granted' && !want) { dl('从桌面图标打开，自动开始'); start(); } })
+      .catch(() => { });
+  })();
   if (!isChrome) showBanner(`你现在用的是「${BROWSER}」，语音识别多半用不了。请复制下面的网址，用 Chrome 打开：\n${location.href.split('#')[0]}`);
   else if (cfg.engine !== 'dg' && !SR) showBanner('这个 Chrome 不能做语音识别，请更新到最新版。' + SWITCH_TIP);
   else if (!window.isSecureContext) showBanner('需要用 https 开头的网址打开（例如 GitHub Pages），直接打开本地文件时用不了麦克风。');
