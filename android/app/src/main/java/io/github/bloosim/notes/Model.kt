@@ -194,6 +194,8 @@ object Prefs {
     var lastModels: String get() = s("lastModels", "{}"); set(v) = ps("lastModels", v)
     var overlayX: Int get() = i("ovx", -1); set(v) = pi("ovx", v)
     var overlayY: Int get() = i("ovy", -1); set(v) = pi("ovy", v)
+    /** until when recognizing our own recording is known not to work on this phone (elapsed wall-clock ms) */
+    var pipeBadUntil: Long get() = sp.getLong("pipeBadUntil", 0L); set(v) = sp.edit().putLong("pipeBadUntil", v).apply()
 
     val recLang: String get() = if (lang == "en") "en-US" else "ja-JP"
     val langName: String get() = if (lang == "en") "英语" else "日语"
@@ -248,6 +250,27 @@ object Txt {
     fun clean(s: String?) = (s ?: "").replace(WS, " ").trim()
     fun norm(s: String?) = (s ?: "").replace(NORM, "").lowercase()
 
+    /**
+     * The part of [full] that comes after [prefix]. The recognizer's running text of one session holds every
+     * sentence said so far; the sentences already turned into lines are skipped. Compared without spaces and
+     * punctuation, because the final text adds punctuation the running text did not have.
+     */
+    fun after(full: String, prefix: String): String {
+        val np = norm(prefix)
+        val n = np.length
+        if (n == 0) return clean(full)
+        // a recognizer that starts its text over (instead of adding to it) gives a text that does not begin like the prefix
+        val k = minOf(2, n)
+        if (!norm(full).startsWith(np.substring(0, k))) return clean(full).replace(LEAD, "").trim()
+        var seen = 0
+        var i = 0
+        while (i < full.length && seen < n) {
+            if (norm(full[i].toString()).isNotEmpty()) seen++
+            i++
+        }
+        return clean(full.substring(i)).replace(LEAD, "").trim()
+    }
+
     /** join two consecutive pieces of speech (Japanese without a space) */
     fun join(a: String, b: String, lang: String): String = when {
         a.isBlank() -> b
@@ -268,7 +291,7 @@ object Txt {
 
     private val FILL_JA = Regex("(^|[\\s、。,，])(?:えっと|えーっと|えーと|ええと|えー+|あのー+|あのう|あの|うーん|うーむ|そのー+|まあー+)(?=$|[\\s、。,，])")
     private val FILL_EN = Regex("(?i)(^|[\\s,.])(?:um+|uh+|erm+|hmm+|uh-huh)(?=$|[\\s,.])")
-    private val LEAD = Regex("^[\\s、。,，.]+")
+    private val LEAD = Regex("^[\\s、。,，.！!？?]+")
 
     /** fillers like えっと confuse the translator, so they are left out of what gets translated */
     fun forTranslate(text: String, lang: String): String {

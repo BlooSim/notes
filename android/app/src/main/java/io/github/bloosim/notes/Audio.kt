@@ -179,9 +179,12 @@ object LangPack {
             .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
         val primary = lang.substringBefore('-').lowercase()
         fun has(l: List<String>) = l.any { it.lowercase().replace('_', '-').substringBefore('-') == primary }
+        var answered = false
         try {
             r.checkRecognitionSupport(i, ctx.mainExecutor, object : RecognitionSupportCallback {
                 override fun onSupportResult(s: RecognitionSupport) {
+                    if (answered || finished) return
+                    answered = true
                     when {
                         has(s.installedOnDeviceLanguages) -> finish("installed")
                         has(s.pendingOnDeviceLanguages) -> finish("pending")
@@ -190,7 +193,8 @@ object LangPack {
                         else -> startDownload(ctx, r, i, ::finish)
                     }
                 }
-                override fun onError(error: Int) { finish("error:$error") }
+                // some speech services report an error and still send the answer right after
+                override fun onError(error: Int) { h.postDelayed({ if (!answered) finish("error:$error") }, 2000) }
             })
         } catch (e: Exception) { finish("error:" + e.javaClass.simpleName) }
     }
@@ -217,6 +221,7 @@ object LangPack {
         st == "pending" || st == "scheduled" || st == "requested" -> "${langName}离线包正在下载…"
         st == "missing" -> "${langName}离线包还没下载"
         st == "unsupported" -> "手机的语音服务不支持${langName}离线识别"
+        st == "error:14" -> "手机的语音服务不能查询离线包（只能亮屏识别）"
         else -> "查不到离线包状态（$st）"
     }
 }
@@ -353,6 +358,7 @@ class PhoneAsr(private val ctx: Context, private val cb: Callback, private val v
             if (forLang != lang) return@check
             packState = st
             Hub.dl("离线语言包 $forLang：$st")
+            if (st == "installed" || st == "downloaded") Prefs.pipeBadUntil = 0
             if (active && piped && st != "installed" && st != "downloaded" && !st.startsWith("error")) {
                 giveUp("手机上没有这个语言的离线包（$st）")
             }
@@ -362,13 +368,14 @@ class PhoneAsr(private val ctx: Context, private val cb: Callback, private val v
 
     /** false when the language pack is known to be missing, so recognizing our recording cannot work */
     fun pipeUsable(forLang: String): Boolean =
-        pipeSupported && !(packLang == forLang && packState.isNotEmpty() && packState != "installed" && packState != "downloaded" && !packState.startsWith("error"))
+        pipeSupported && Prefs.pipeBadUntil < System.currentTimeMillis() && !(packLang == forLang && packState.isNotEmpty() && packState != "installed" && packState != "downloaded" && !packState.startsWith("error"))
 
     /** checks again later whether a pack being downloaded is ready */
     fun recheckPack(done: (Boolean) -> Unit) {
         val forLang = lang
         LangPack.check(ctx, forLang, false) { st ->
             if (forLang == lang) { packLang = forLang; packState = st }
+            if (st == "installed") Prefs.pipeBadUntil = 0
             done(st == "installed")
         }
     }
@@ -403,8 +410,9 @@ class PhoneAsr(private val ctx: Context, private val cb: Callback, private val v
         i.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
         i.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
         i.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, ctx.packageName)
-        i.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, pauseMs + 300L)
-        i.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, pauseMs + 300L)
+        // keep listening across normal pauses: restarting loses the words said meanwhile; the app splits sentences itself
+        i.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 5000L)
+        i.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 5000L)
         if (piped && Build.VERSION.SDK_INT >= 33) {
             try {
                 val p = ParcelFileDescriptor.createPipe()
@@ -442,7 +450,7 @@ class PhoneAsr(private val ctx: Context, private val cb: Callback, private val v
         if (restartPending) return
         val stuck = when {
             !ready && now - startedAt > 5000 -> "没有响应"
-            ready && now - lastEvt > 8000 && voiceAt() > lastEvt + 1500 && now - voiceAt() < 6000 -> "有声音但没有结果"
+            ready && now - lastEvt > 6000 && voiceAt() > lastEvt + 1500 && now - voiceAt() < 5000 -> "有声音但没有结果"
             now - startedAt > 75_000 -> "太久"
             else -> return
         }
@@ -481,6 +489,9 @@ class PhoneAsr(private val ctx: Context, private val cb: Callback, private val v
     } + "($e)"
 
     private fun touch() { lastEvt = SystemClock.elapsedRealtime() }
+
+    /** how long the current session has been listening */
+    fun sessionAgeMs(): Long = SystemClock.elapsedRealtime() - startedAt
 
     private val listener = object : RecognitionListener {
         override fun onReadyForSpeech(params: Bundle?) {
@@ -534,6 +545,8 @@ class PhoneAsr(private val ctx: Context, private val cb: Callback, private val v
                 else -> {
                     fails++
                     Hub.dl("手机识别#$session ${errName(error)}")
+                    // with our recording, these mean the service cannot handle it on this phone
+                    if (piped && (error == SpeechRecognizer.ERROR_NETWORK || error == 11) && ++hangs >= 3) { giveUp("手机识别处理不了这里的录音（${errName(error)}）"); return }
                     if (piped && error == SpeechRecognizer.ERROR_AUDIO && fails >= 3) { giveUp("手机识别读不到这里的录音"); return }
                     dropRecognizer()
                     if (fails >= 8) giveUp("手机识别一直出错（${errName(error)}）") else again(min(3000L, 300L * fails))
@@ -544,6 +557,8 @@ class PhoneAsr(private val ctx: Context, private val cb: Callback, private val v
 
     private fun giveUp(reason: String) {
         Hub.dl(reason)
+        // remember for a week, so the next start does not lose time trying again
+        if (piped) Prefs.pipeBadUntil = System.currentTimeMillis() + 7 * 24 * 3600_000L
         stop()
         cb.onGiveUp(reason)
     }

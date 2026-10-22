@@ -128,7 +128,7 @@ class SettingsActivity : Activity() {
 
         row("对方说的语言", seg(listOf("ja" to "日语", "en" to "英语"), { Prefs.lang }) { Prefs.lang = it; ListenService.send(this, ListenService.ACT_LANG); if (::packOut.isInitialized) pack(false) })
         val pb = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        pb.addView(button("下载离线语音包") { pack(true) })
+        pb.addView(button("下载离线语音包") { Prefs.pipeBadUntil = 0; pack(true) })
         form.addView(pb)
         packOut = hint("")
         hint("用「手机」识别时，要有对方语言的离线语音包，切到后台和锁屏才能继续识别；没有的话只能亮屏识别。日语和英语各需要一个（切换语言后再点一次）。")
