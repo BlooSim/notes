@@ -155,6 +155,7 @@ body.rec .fab .i-pause { display: block; }
 .diaglog { margin-top: 8px; font: 12px/1.6 ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow-y: auto; }
 .acts { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; }
 .btn { padding: 9px 16px; border-radius: 10px; border: 1px solid var(--rule); background: var(--paper); font-size: 14px; }
+.btn:disabled { opacity: .5; }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
 .hint { color: var(--muted); font-size: 13px; line-height: 1.65; margin: 16px 0 0; }
 .txtbtn { color: var(--accent-ink); font-size: 15px; font-weight: 600; padding: 6px 4px; }
@@ -462,11 +463,62 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     return t.slice(i).trim();
   }
 
-  const VERSION = 'v4';
+  const VERSION = 'v5';
 
   /* ---------- diagnostics: what the recognition service actually does ---------- */
   const dlog = [];
-  let dStarts = 0, dHeardSinceStart = false, listenSince = 0, hintTimer = 0, silentEnds = 0, compat = false;
+  let dStarts = 0, dHeardSinceStart = false, listenSince = 0, hintTimer = 0, silentEnds = 0;
+  // Ways to run the phone's recognizer. "网页录音" = the page opens the mic itself and hands the audio
+  // track to the recognizer, for phones that mute the recognition service's own background recording.
+  const MODES = [
+    { c: true, t: false, n: '连续' },
+    { c: true, t: true, n: '连续+网页录音' },
+    { c: false, t: true, n: '单句+网页录音' },
+    { c: false, t: false, n: '单句' }
+  ];
+  let modeIdx = Number.isInteger(cfg.srMode) && MODES[cfg.srMode] ? cfg.srMode : 0;
+  let trackBroken = false, srStream = null, spawnWaiting = false;
+  let actx = null, meterSrc = null, meterAn = null, micLevel = -1;
+  const curMode = () => MODES[modeIdx];
+  function nextMode() {
+    for (let k = 1; k <= MODES.length; k++) {
+      const i = (modeIdx + k) % MODES.length;
+      if (!(MODES[i].t && trackBroken)) { modeIdx = i; return; }
+    }
+  }
+  const streamLive = () => !!(srStream && srStream.getAudioTracks().some(t => t.readyState === 'live'));
+  async function ensureSrStream() {
+    if (streamLive()) return true;
+    try {
+      srStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+      startMeter(srStream);
+      dl('网页录音已打开');
+      return true;
+    } catch (e) { dl('网页录音失败：' + (e && e.name)); return false; }
+  }
+  function releaseSrStream() {
+    if (meterSrc) { try { meterSrc.disconnect(); } catch (e) { } meterSrc = null; }
+    if (srStream) { srStream.getTracks().forEach(t => t.stop()); srStream = null; }
+    micLevel = -1;
+  }
+  function startMeter(stream) {
+    try {
+      if (!actx) return;
+      if (actx.state === 'suspended') actx.resume();
+      meterSrc = actx.createMediaStreamSource(stream);
+      meterAn = actx.createAnalyser(); meterAn.fftSize = 1024;
+      meterSrc.connect(meterAn);
+      const buf = new Float32Array(meterAn.fftSize);
+      const tick = () => {
+        if (!meterSrc) return;
+        meterAn.getFloatTimeDomainData(buf);
+        let sum = 0; for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+        micLevel = Math.max(micLevel * 0.6, Math.min(1, Math.sqrt(sum / buf.length) * 6));
+        setTimeout(tick, 200);
+      };
+      tick();
+    } catch (e) { micLevel = -1; }
+  }
   const EVN = { start: '开始', audiostart: '麦克风打开', soundstart: '有声音', speechstart: '有说话声', speechend: '说话结束', soundend: '声音结束', audioend: '麦克风关闭', nomatch: '听到但没认出', end: '结束' };
   function dl(ev) {
     const d = new Date();
@@ -480,7 +532,7 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     const el = $('#liveDiag');
     const show = want && cfg.engine !== 'dg' && !dHeardSinceStart && Date.now() - listenSince > 6000;
     el.hidden = !show;
-    if (show) el.textContent = `还没收到识别结果 · 已启动 ${dStarts} 次${compat ? ' · 单句模式' : ''} · 最近：${recentEvents()}`;
+    if (show) el.textContent = `还没收到识别结果 · 已启动 ${dStarts} 次 · 模式：${curMode().n}${micLevel >= 0 ? ` · 网页麦克风音量 ${Math.round(micLevel * 100)}%` : ''} · 最近：${recentEvents()}`;
   }
   let lastErr = '';
   function browserName() {
@@ -517,6 +569,8 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     }
     want = true; quickEnds = 0; lastErr = ''; hideBanner();
     dHeardSinceStart = false; listenSince = Date.now(); silentEnds = 0;
+    if (cfg.engine !== 'dg' && !actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { actx = null; } }
+    if (actx && actx.state === 'suspended') actx.resume().catch(() => { });
     clearInterval(hintTimer); hintTimer = setInterval(paintHint, 1000);
     document.body.classList.add('rec');
     $('#btnRec').setAttribute('aria-label', '暂停');
@@ -532,6 +586,7 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     document.body.classList.remove('rec');
     $('#btnRec').setAttribute('aria-label', '开始');
     if (rec) { try { rec.stop(); } catch (e) { } }
+    releaseSrStream();
     dgStop();
     updateMeta(); updateLive();
     releaseAwake();
@@ -644,27 +699,47 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
       if (sess) flush(sess);
       try { old.abort(); } catch (e) { }
     }
+    const mode = curMode();
+    if (mode.t && !streamLive()) {
+      if (!spawnWaiting) {
+        spawnWaiting = true;
+        ensureSrStream().then(ok => {
+          spawnWaiting = false;
+          if (!ok) { trackBroken = true; nextMode(); }
+          spawn();
+        });
+      }
+      return;
+    }
+    if (!mode.t && srStream) releaseSrStream(); // give the mic back to the recognition service
     const r = new SR();
     r.lang = LANGS[cfg.lang].rec;
-    // Some phones never return results in continuous mode; after two silent sessions, try one-sentence-per-session mode
-    r.continuous = !compat;
+    r.continuous = mode.c;
     r.interimResults = true;
     r.maxAlternatives = 1;
-    const s = { done: new Set(), fin: '', interim: '', pending: null, liveFor: '', heard: false };
+    const s = { done: new Set(), fin: '', interim: '', pending: null, liveFor: '', heard: false, mode: modeIdx };
     dStarts++;
-    dl(`启动#${dStarts} ${r.lang}${compat ? ' 单句模式' : ''}`);
+    dl(`启动#${dStarts} ${r.lang} ${mode.n}`);
     if (r.addEventListener) Object.keys(EVN).filter(n => n !== 'end').forEach(n => r.addEventListener(n, () => { if (rec === r) dl(EVN[n]); }));
     r.onresult = ev => { if (rec === r) onResult(ev, s); };
     r.onerror = ev => { if (rec === r) onError(ev); };
     r.onend = () => { if (rec === r) onEnd(s); };
     rec = r; sess = s;
-    try { r.start(); startedAt = Date.now(); }
-    catch (e) { rec = null; restartT = setTimeout(spawn, 700); }
+    try {
+      if (mode.t) r.start(srStream.getAudioTracks()[0]); else r.start();
+      startedAt = Date.now();
+    } catch (e) {
+      dl('启动失败：' + (e && e.name) + ' ' + (e && e.message || ''));
+      rec = null;
+      if (mode.t) { trackBroken = true; nextMode(); }
+      restartT = setTimeout(spawn, 700);
+    }
   }
   function onResult(ev, s) {
     if (!s.heard) { const r0 = ev.results[ev.resultIndex]; dl('收到结果：' + ((r0 && r0[0] && r0[0].transcript) || '').slice(0, 14)); }
     s.heard = true; quickEnds = 0; lastErr = ''; setNet(false);
     dHeardSinceStart = true; silentEnds = 0; paintHint();
+    if (cfg.srMode !== s.mode) { cfg.srMode = s.mode; saveCfg(); dl('记住可用的模式：' + MODES[s.mode].n); }
     let interim = '';
     for (let i = ev.resultIndex; i < ev.results.length; i++) {
       const res = ev.results[i];
@@ -736,16 +811,16 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     dl(EVN.end);
     flush(s);
     rec = null;
-    if (want && !s.heard) {
+    // until something has been recognized in this run, try the next mode after every two silent sessions
+    if (want && !s.heard && !dHeardSinceStart) {
       silentEnds++;
-      const next = silentEnds % 4 >= 2; // alternate the two modes every two silent sessions
-      if (next !== compat) { compat = next; dl(compat ? '换成单句模式' : '换回连续模式'); }
+      if (silentEnds % 2 === 0) { nextMode(); dl('换成模式：' + curMode().n); }
     }
     if (!want) { updateMeta(); updateLive(); return; }
     if (document.hidden) return; // resumes when the page is visible again
     // a session that ends within 1.5 s without hearing anything is a failed start
     quickEnds = (!s.heard && Date.now() - startedAt < 1500) ? quickEnds + 1 : 0;
-    if (quickEnds >= 4) { stop(); showBanner(explainFailure()); return; }
+    if (quickEnds >= 8) { stop(); showBanner(explainFailure()); return; }
     restartT = setTimeout(spawn, quickEnds > 1 ? 1000 : 120);
   }
   function onError(ev) {
@@ -853,11 +928,12 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     const out = $('#testOut');
     if (!SR) { out.textContent = '这个浏览器没有语音识别功能。'; return; }
     if (want) stop();
-    if (testRec) { try { testRec.abort(); } catch (e) { } }
+    if (testRec) return; // a test is already running; just speak
+    document.querySelectorAll('#btnTestJa,#btnTestZh').forEach(b => { b.disabled = true; });
     const r = testRec = new SR();
     r.lang = lang; r.continuous = false; r.interimResults = true; r.maxAlternatives = 1;
     let got = '';
-    out.textContent = `请现在说一句${label}…`;
+    out.textContent = `正在听，请说一句${label}，说完等几秒…`;
     dl(`${label}测试开始 ${lang}`);
     if (r.addEventListener) Object.keys(EVN).filter(n => n !== 'end').forEach(n => r.addEventListener(n, () => dl(`测试 ${EVN[n]}`)));
     r.onresult = ev => {
@@ -867,11 +943,13 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     };
     r.onerror = ev => { dl('测试 错误：' + ev.error); if (!got) out.textContent = `${label}测试出错：${ev.error}`; };
     r.onend = () => {
+      testRec = null;
+      document.querySelectorAll('#btnTestJa,#btnTestZh').forEach(b => { b.disabled = false; });
       dl(`测试 结束${got ? '：' + got.slice(0, 14) : '，没有结果'}`);
       if (!got && !/出错/.test(out.textContent)) out.textContent = `${label}测试结束，没有识别到任何内容。`;
       paintSettings();
     };
-    try { r.start(); } catch (e) { out.textContent = '启动失败：' + e.message; }
+    try { r.start(); } catch (e) { testRec = null; document.querySelectorAll('#btnTestJa,#btnTestZh').forEach(b => { b.disabled = false; }); out.textContent = '启动失败：' + e.message; }
   }
   $('#btnTestJa').addEventListener('click', () => runTest('ja-JP', '日语'));
   $('#btnTestZh').addEventListener('click', () => runTest('zh-CN', '中文'));
