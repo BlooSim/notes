@@ -143,12 +143,15 @@ object Store {
         pending = true
         main.postDelayed({
             pending = false
-            val o = JSONObject().put("current", current.id)
-            val a = JSONArray()
-            notes.forEach { a.put(it.toJson()) }
-            o.put("notes", a)
-            val text = o.toString()
+            // copy on the main thread (cheap), turn into text on the background thread
+            val cur = current.id
+            val snap = notes.map { n -> Note(n.id, n.created, n.title, n.entries.mapTo(mutableListOf()) { e -> Entry(e.n, e.src, e.zh, e.lang, e.ts, e.st, e.by) }) }
             io.execute {
+                val o = JSONObject().put("current", cur)
+                val a = JSONArray()
+                snap.forEach { a.put(it.toJson()) }
+                o.put("notes", a)
+                val text = o.toString()
                 try {
                     val tmp = File(file.parentFile, "notes.json.tmp")
                     tmp.writeText(text)
@@ -207,6 +210,8 @@ object Hub {
     var overlayOn = false
     /** what is being heard right now (not yet a numbered line) */
     var live = ""
+    /** quick translation of [live] */
+    var liveZh = ""
     var liveLabel = ""
     /** which service answered last, or why the phone recognizer is used */
     var status = ""

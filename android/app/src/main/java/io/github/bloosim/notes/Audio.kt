@@ -12,8 +12,11 @@ import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
+import android.speech.ModelDownloadListener
 import android.speech.RecognitionListener
 import android.speech.RecognitionService
+import android.speech.RecognitionSupport
+import android.speech.RecognitionSupportCallback
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import java.io.IOException
@@ -150,6 +153,75 @@ class Vad(private val listener: Listener) {
 }
 
 /**
+ * The offline language pack of the phone's speech service. Recognizing our own recording (which keeps
+ * working in the background) is done on the phone, so it needs the pack for the other person's language.
+ * Android 13+.
+ */
+object LangPack {
+    /** results: installed, pending, missing, unsupported, downloaded, scheduled, requested, error:… */
+    fun check(ctx: Context, lang: String, download: Boolean, done: (String) -> Unit) {
+        if (Build.VERSION.SDK_INT < 33) { done("unsupported"); return }
+        val comp = PhoneAsr.pickService(ctx)
+        val r = try {
+            if (comp != null) SpeechRecognizer.createSpeechRecognizer(ctx, comp) else SpeechRecognizer.createSpeechRecognizer(ctx)
+        } catch (e: Exception) { done("error:" + e.javaClass.simpleName); return }
+        val h = Handler(Looper.getMainLooper())
+        var finished = false
+        fun finish(st: String) {
+            if (finished) return
+            finished = true
+            done(st)
+            h.postDelayed({ try { r.destroy() } catch (_: Exception) { } }, 3000)
+        }
+        h.postDelayed({ finish("error:timeout") }, 15000)
+        val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+            .putExtra(RecognizerIntent.EXTRA_LANGUAGE, lang)
+            .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+        val primary = lang.substringBefore('-').lowercase()
+        fun has(l: List<String>) = l.any { it.lowercase().replace('_', '-').substringBefore('-') == primary }
+        try {
+            r.checkRecognitionSupport(i, ctx.mainExecutor, object : RecognitionSupportCallback {
+                override fun onSupportResult(s: RecognitionSupport) {
+                    when {
+                        has(s.installedOnDeviceLanguages) -> finish("installed")
+                        has(s.pendingOnDeviceLanguages) -> finish("pending")
+                        !has(s.supportedOnDeviceLanguages) -> finish("unsupported")
+                        !download -> finish("missing")
+                        else -> startDownload(ctx, r, i, ::finish)
+                    }
+                }
+                override fun onError(error: Int) { finish("error:$error") }
+            })
+        } catch (e: Exception) { finish("error:" + e.javaClass.simpleName) }
+    }
+
+    private fun startDownload(ctx: Context, r: SpeechRecognizer, i: Intent, finish: (String) -> Unit) {
+        Hub.dl("开始下载离线语言包")
+        fun plain() {
+            try { r.triggerModelDownload(i); finish("requested") } catch (e: Exception) { finish("error:" + e.javaClass.simpleName) }
+        }
+        if (Build.VERSION.SDK_INT >= 34) {
+            try {
+                r.triggerModelDownload(i, ctx.mainExecutor, object : ModelDownloadListener {
+                    override fun onProgress(completedPercent: Int) { }
+                    override fun onSuccess() { finish("downloaded") }
+                    override fun onScheduled() { finish("scheduled") }
+                    override fun onError(error: Int) { if (error == 15) plain() else finish("error:$error") }
+                })
+            } catch (e: Exception) { plain() }
+        } else plain()
+    }
+
+    fun describe(st: String, langName: String): String = when {
+        st == "installed" || st == "downloaded" -> "${langName}离线包已安装 ✓"
+        st == "pending" || st == "scheduled" || st == "requested" -> "${langName}离线包正在下载…"
+        st == "missing" -> "${langName}离线包还没下载"
+        st == "unsupported" -> "手机的语音服务不支持${langName}离线识别"
+        else -> "查不到离线包状态（$st）"
+    }
+}
+
+/**
  * The phone's own speech recognizer (Google). On Android 13+ it is fed from our recording through a pipe,
  * so it keeps working in the background and on phones that mute other apps' microphones.
  * Each session is one sentence; a new one starts right after, with a fresh recognizer (as Chrome does),
@@ -161,7 +233,27 @@ class PhoneAsr(private val ctx: Context, private val cb: Callback, private val v
         fun onPartial(t: String)
         fun onFinal(t: String)
         fun onGiveUp(reason: String)
+        /** a session ended, with or without a final result */
+        fun onSessionEnd() {}
+        /** result of checking (and downloading) the offline language pack */
+        fun onPack(st: String) {}
     }
+
+    companion object {
+        fun pickService(ctx: Context): ComponentName? {
+            val list = ctx.packageManager.queryIntentServices(Intent(RecognitionService.SERVICE_INTERFACE), 0)
+            for (pkg in listOf("com.google.android.googlequicksearchbox", "com.google.android.tts")) {
+                val ri = list.firstOrNull { it.serviceInfo?.packageName == pkg } ?: continue
+                return ComponentName(ri.serviceInfo.packageName, ri.serviceInfo.name)
+            }
+            return null
+        }
+    }
+
+    /** the language whose offline pack was last checked, and the answer */
+    private var packLang = ""
+    var packState = ""
+        private set
 
     private val h = Handler(Looper.getMainLooper())
     private var sr: SpeechRecognizer? = null
@@ -188,6 +280,8 @@ class PhoneAsr(private val ctx: Context, private val cb: Callback, private val v
     private var gotSomething = false
     private var speechEndAt = 0L
     private var endedAt = 0L
+    /** when we ended the current sentence ourselves */
+    private var cutAt = 0L
     private var silentLogged = 0
 
     private var restartPending = false
@@ -210,6 +304,7 @@ class PhoneAsr(private val ctx: Context, private val cb: Callback, private val v
         try { sr?.cancel() } catch (_: Exception) { }
         speechEndAt = 0; endedAt = 0
         Hub.dl("手机识别开始（" + (if (piped) "用 App 的录音" else "识别服务自己录音") + "，$lang）")
+        if (piped) ensurePack()
         begin()
         h.postDelayed(watchdog, 1000)
     }
@@ -222,10 +317,12 @@ class PhoneAsr(private val ctx: Context, private val cb: Callback, private val v
         synchronized(lock) { recent.clear() }
     }
 
-    /** end the current sentence now; its final result still arrives */
-    fun finishSentence() {
-        try { sr?.stopListening() } catch (_: Exception) { }
+    /** end the current sentence now (at a pause we noticed); its final result still arrives */
+    fun cut() {
+        if (!active) return
+        cutAt = SystemClock.elapsedRealtime()
         synchronized(lock) { writer?.close() }
+        try { sr?.stopListening() } catch (_: Exception) { }
     }
 
     fun destroy() {
@@ -245,13 +342,35 @@ class PhoneAsr(private val ctx: Context, private val cb: Callback, private val v
         }
     }
 
-    private fun pickService(): ComponentName? {
-        val list = ctx.packageManager.queryIntentServices(Intent(RecognitionService.SERVICE_INTERFACE), 0)
-        for (pkg in listOf("com.google.android.googlequicksearchbox", "com.google.android.tts")) {
-            val ri = list.firstOrNull { it.serviceInfo?.packageName == pkg } ?: continue
-            return ComponentName(ri.serviceInfo.packageName, ri.serviceInfo.name)
+    private fun pickService(): ComponentName? = pickService(ctx)
+
+    /** our recording is recognized on the phone: make sure the language pack is there, download it if not */
+    private fun ensurePack() {
+        if (packLang == lang && (packState == "installed" || packState == "downloaded")) return
+        packLang = lang
+        val forLang = lang
+        LangPack.check(ctx, forLang, true) { st ->
+            if (forLang != lang) return@check
+            packState = st
+            Hub.dl("离线语言包 $forLang：$st")
+            if (active && piped && st != "installed" && st != "downloaded" && !st.startsWith("error")) {
+                giveUp("手机上没有这个语言的离线包（$st）")
+            }
+            cb.onPack(st)
         }
-        return null
+    }
+
+    /** false when the language pack is known to be missing, so recognizing our recording cannot work */
+    fun pipeUsable(forLang: String): Boolean =
+        pipeSupported && !(packLang == forLang && packState.isNotEmpty() && packState != "installed" && packState != "downloaded" && !packState.startsWith("error"))
+
+    /** checks again later whether a pack being downloaded is ready */
+    fun recheckPack(done: (Boolean) -> Unit) {
+        val forLang = lang
+        LangPack.check(ctx, forLang, false) { st ->
+            if (forLang == lang) { packLang = forLang; packState = st }
+            done(st == "installed")
+        }
     }
 
     private var loggedService = false
@@ -284,15 +403,15 @@ class PhoneAsr(private val ctx: Context, private val cb: Callback, private val v
         i.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
         i.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
         i.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, ctx.packageName)
-        i.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, pauseMs.toLong())
-        i.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, pauseMs.toLong())
+        i.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, pauseMs + 300L)
+        i.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, pauseMs + 300L)
         if (piped && Build.VERSION.SDK_INT >= 33) {
             try {
                 val p = ParcelFileDescriptor.createPipe()
                 readSide = p[0]
                 val w = PipeWriter(p[1]).also { it.start() }
                 // start with what was said after the last session stopped listening
-                val endRef = if (speechEndAt > 0) speechEndAt else if (endedAt > 0) endedAt else now
+                val endRef = when { cutAt > 0 -> cutAt + 100; speechEndAt > 0 -> speechEndAt; endedAt > 0 -> endedAt; else -> now }
                 val from = max(endRef - 200, now - 3000)
                 synchronized(lock) {
                     for ((t, b) in recent) if (t >= from) w.offer(b)
@@ -306,7 +425,7 @@ class PhoneAsr(private val ctx: Context, private val cb: Callback, private val v
         }
         session++; used++
         startedAt = now; lastEvt = now; ready = false; gotSomething = false
-        speechEndAt = 0
+        speechEndAt = 0; cutAt = 0
         try { r.startListening(i) } catch (e: Exception) { Hub.dl("手机识别启动失败：" + e.message); dropRecognizer(); again(800) }
     }
 
@@ -327,6 +446,7 @@ class PhoneAsr(private val ctx: Context, private val cb: Callback, private val v
             now - startedAt > 75_000 -> "太久"
             else -> return
         }
+        if (stuck == "太久" && gotSomething && cutAt == 0L) { cut(); return } // a very long sentence: end it so its text comes back
         if (stuck != "太久") hangs++
         Hub.dl("手机识别#$session $stuck，重新开始" + (if (hangs > 0) "（第 $hangs 次）" else ""))
         dropRecognizer()
@@ -386,6 +506,7 @@ class PhoneAsr(private val ctx: Context, private val cb: Callback, private val v
             fails = 0; quick = 0; hangs = 0
             if (session <= 4) Hub.dl("手机识别#$session 结果：" + t.take(14).ifEmpty { "（空）" })
             if (t.isNotEmpty()) cb.onFinal(t)
+            cb.onSessionEnd()
             again(50)
         }
 
@@ -394,6 +515,7 @@ class PhoneAsr(private val ctx: Context, private val cb: Callback, private val v
             val now = SystemClock.elapsedRealtime()
             endedAt = now
             val ran = now - startedAt
+            cb.onSessionEnd()
             when (error) {
                 SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
                     // normal when nobody talks; but endless instant failures mean the service ignores our audio
@@ -408,7 +530,7 @@ class PhoneAsr(private val ctx: Context, private val cb: Callback, private val v
                     again(500)
                 }
                 SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> giveUp("手机识别没有麦克风权限")
-                12, 13 -> if (piped) giveUp("手机识别不能这样录音（${errName(error)}）") else { fails++; Hub.dl("手机识别#$session ${errName(error)}"); if (fails >= 4) giveUp("手机识别用不了（${errName(error)}）") else again(1500) }
+                12, 13 -> if (piped) { packLang = ""; ensurePack(); giveUp("手机识别不能这样录音（${errName(error)}）") } else { fails++; Hub.dl("手机识别#$session ${errName(error)}"); if (fails >= 4) giveUp("手机识别用不了（${errName(error)}）") else again(1500) }
                 else -> {
                     fails++
                     Hub.dl("手机识别#$session ${errName(error)}")

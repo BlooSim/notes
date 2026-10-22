@@ -68,7 +68,13 @@ object Ui {
             root.addView(col, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         }
 
+        private var shown = ""
+
         fun bind(e: Entry, p: Pal, fontSp: Int, showSrc: Boolean) {
+            // redraw only when something on this line changed
+            val key = "${e.n}|${e.st}|${e.zh}|${e.src}|${e.why}|$fontSp|$showSrc|${p.dark}"
+            if (key == shown) return
+            shown = key
             no.text = e.n.toString()
             zh.setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSp.toFloat())
             src.setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSp * 0.78f)

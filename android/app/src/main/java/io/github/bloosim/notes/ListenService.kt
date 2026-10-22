@@ -97,6 +97,16 @@ class ListenService : Service(), Vad.Listener, PhoneAsr.Callback, Deepgram.Callb
     private var pendingJobs = 0
     private var lastFallbackToast = 0L
     @Volatile private var feedPhone = false
+    /** phone mode: the line made from the words heard before a pause, waiting for the recognizer's final text */
+    private var prov: Entry? = null
+    private val stallRun = Runnable { stall() }
+    // translation of the words being heard right now (the live line)
+    private val liveExec = Executors.newSingleThreadExecutor()
+    private var liveFor = ""
+    private var liveAt = 0L
+    private var livePending = false
+    private var liveSeq = 0
+    private var liveBlockUntil = 0L
 
     override fun onCreate() {
         super.onCreate()
@@ -125,7 +135,7 @@ class ListenService : Service(), Vad.Listener, PhoneAsr.Callback, Deepgram.Callb
         phone.destroy()
         dg.close()
         capture.stop()
-        Hub.running = false; Hub.holding = false; Hub.live = ""; Hub.liveLabel = ""
+        Hub.running = false; Hub.holding = false; Hub.live = ""; Hub.liveZh = ""; Hub.liveLabel = ""
         instance = null
         Hub.changed()
         super.onDestroy()
@@ -148,6 +158,7 @@ class ListenService : Service(), Vad.Listener, PhoneAsr.Callback, Deepgram.Callb
     }
 
     private fun toast(t: String) = Toast.makeText(this, t, Toast.LENGTH_SHORT).show()
+    private fun toastLong(t: String) = Toast.makeText(this, t, Toast.LENGTH_LONG).show()
 
     private fun ensureForeground(): Boolean {
         if (fg) return true
@@ -197,7 +208,7 @@ class ListenService : Service(), Vad.Listener, PhoneAsr.Callback, Deepgram.Callb
         if (!wantPhone()) { if (phone.active) phone.stop(); feedPhone = false; return }
         if (phone.active) return
         phone.pauseMs = Prefs.pause
-        if (phone.pipeSupported) {
+        if (phone.pipeUsable(Prefs.recLang)) {
             if (!capture.running) capture.start()
             if (capture.running) { phone.start(Prefs.recLang, true); feedPhone = true; return }
         }
@@ -218,7 +229,8 @@ class ListenService : Service(), Vad.Listener, PhoneAsr.Callback, Deepgram.Callb
         vad.enabled = cloudCont
         pvText = ""; pvInterim = ""; speaking = false
         Hub.running = true
-        Hub.live = ""; Hub.liveLabel = ""
+        prov = null
+        setLive(""); Hub.liveLabel = ""
         Hub.status = when (mode) {
             "cloud" -> if (Cloud.anyUsable()) "大模型识别" else "大模型额度用完，正在用手机识别"
             "dg" -> if (dg.up) "Deepgram 识别" else "Deepgram 连接中…"
@@ -235,8 +247,10 @@ class ListenService : Service(), Vad.Listener, PhoneAsr.Callback, Deepgram.Callb
         vad.flush() // the sentence being said when you stopped
         vad.enabled = false
         Hub.running = false
+        main.removeCallbacks(stallRun)
         if (mode == "phone" && Hub.live.isNotBlank()) commitPhone(Hub.live)
-        Hub.live = ""; Hub.liveLabel = ""; speaking = false
+        prov = null
+        setLive(""); Hub.liveLabel = ""; speaking = false
         if (hold == null) {
             phone.stop(); feedPhone = false
             if (mode == "dg" && dg.want) {
@@ -261,7 +275,13 @@ class ListenService : Service(), Vad.Listener, PhoneAsr.Callback, Deepgram.Callb
         when {
             h != null -> { h.interim = t; showHoldLive() }
             Hub.running && cloudCont -> { pvInterim = t; showCloudLive() }
-            Hub.running -> { Hub.live = t; Hub.liveLabel = ""; Hub.changed() }
+            Hub.running -> {
+                Hub.liveLabel = ""
+                setLive(t)
+                // the phone recognizer may wait long before ending a sentence: a pause in the words ends it here
+                main.removeCallbacks(stallRun)
+                main.postDelayed(stallRun, Prefs.pause.toLong())
+            }
         }
     }
 
@@ -270,7 +290,75 @@ class ListenService : Service(), Vad.Listener, PhoneAsr.Callback, Deepgram.Callb
         when {
             h != null -> { h.text = Txt.combine(h.text, t); h.interim = ""; showHoldLive() }
             Hub.running && cloudCont -> { pvText = Txt.combine(pvText, t); pvInterim = ""; showCloudLive() }
-            Hub.running -> { Hub.live = ""; commitPhone(t) }
+            Hub.running -> {
+                main.removeCallbacks(stallRun)
+                setLive("")
+                val p = prov
+                prov = null
+                if (p != null && noteOf(p) != null) {
+                    // the line is already on screen; the final words replace the quick ones if they differ
+                    if (t.isNotBlank() && !Txt.norm(p.src).contains(Txt.norm(t))) { p.src = t; translate(p) }
+                } else commitPhone(t)
+            }
+        }
+    }
+
+    override fun onSessionEnd() { prov = null }
+
+    /** phone mode: the words have stopped for the pause length, so the sentence is shown and translated now */
+    private fun stall() {
+        if (hold != null || !Hub.running || mode != "phone") return
+        val t = Txt.clean(Hub.live)
+        if (t.isEmpty()) return
+        if (capture.running && SystemClock.elapsedRealtime() - vad.lastVoiceAt < 400) { main.postDelayed(stallRun, 300); return }
+        val before = Store.current.entries.lastOrNull()
+        commitPhone(t)
+        val after = Store.current.entries.lastOrNull()
+        prov = if (after != null && after !== before) after else if (after != null && after.src == t) after else null
+        setLive("")
+        phone.cut()
+    }
+
+    // ---------- the live line and its quick translation ----------
+
+    /** what is being heard right now; a quick translation of it follows */
+    private fun setLive(t: String) {
+        if (t == Hub.live) { Hub.changed(); return }
+        Hub.live = t
+        if (t.isBlank()) {
+            Hub.liveZh = ""; liveFor = ""; liveSeq++
+        } else {
+            if (liveFor.isNotEmpty() && !t.startsWith(liveFor.take(maxOf(1, liveFor.length - 2)))) Hub.liveZh = ""
+            scheduleLiveTr()
+        }
+        Hub.changed()
+    }
+
+    private fun scheduleLiveTr() {
+        val now = SystemClock.elapsedRealtime()
+        if (livePending || now < liveBlockUntil) return
+        livePending = true
+        main.postDelayed({ runLiveTr() }, maxOf(150L, 900L - (now - liveAt)))
+    }
+
+    private fun runLiveTr() {
+        livePending = false
+        val t = Hub.live
+        if (Txt.norm(t).length < 3 || t == liveFor) return
+        val lang = Prefs.lang
+        val q = Txt.forTranslate(t, lang)
+        if (q.isEmpty()) return
+        liveAt = SystemClock.elapsedRealtime()
+        val seq = ++liveSeq
+        liveExec.execute {
+            var limited = false
+            val zh = try { Tr.quick(q, lang) } catch (e: Tr.HttpErr) { limited = e.code == 429; null } catch (_: Exception) { null }
+            main.post {
+                if (limited) { liveBlockUntil = SystemClock.elapsedRealtime() + 300_000; Hub.dl("实时翻译太频繁，暂停 5 分钟") }
+                if (seq != liveSeq || Hub.live.isBlank()) return@post
+                if (zh != null) { liveFor = t; Hub.liveZh = zh; Hub.changed() }
+                if (Hub.live != t) scheduleLiveTr()
+            }
         }
     }
 
@@ -279,7 +367,7 @@ class ListenService : Service(), Vad.Listener, PhoneAsr.Callback, Deepgram.Callb
     override fun onDgLive(t: String) {
         val h = hold
         if (h != null && h.eng == "dg") { h.interim = t; showHoldLive(); return }
-        if (Hub.running && mode == "dg") { Hub.live = t; Hub.liveLabel = ""; Hub.changed() }
+        if (Hub.running && mode == "dg") { Hub.liveLabel = ""; setLive(t) }
     }
 
     override fun onDgSentence(t: String) {
@@ -313,29 +401,64 @@ class ListenService : Service(), Vad.Listener, PhoneAsr.Callback, Deepgram.Callb
         if (wasPiped && phoneOnly && !(Hub.running && mode != "phone")) {
             // the recognizer ignored our recording: let it use the microphone itself (works while the screen is on)
             Hub.dl("改用识别服务自己录音：$reason")
-            if (hold == null) capture.stop()
-            if (!capture.running) {
-                Hub.status = "手机识别（亮屏时可用）"
-                phone.start(Prefs.recLang, false)
-                Hub.changed()
-                return
-            }
+            capture.stop() // only the phone recognizer was using it
+            if (Hub.running) Hub.status = "手机识别（亮屏时可用）"
+            phone.start(Prefs.recLang, false)
+            Hub.changed()
+            return
         }
         if (Hub.running && mode == "phone" && hold == null) { toast(reason); stopRun() }
         else Hub.dl("手机识别停用：$reason")
     }
 
+    // ---------- offline language pack ----------
+
+    private val packPoll = object : Runnable {
+        override fun run() {
+            if (!(Hub.running && mode == "phone" && phone.active && !phone.piped && phone.pipeSupported)) return
+            phone.recheckPack { ok -> if (ok) { toastLong(Prefs.langName + "离线语音包已下载好，切到后台也能继续识别了"); switchToPiped() } else main.postDelayed(this, 45_000) }
+        }
+    }
+
+    override fun onPack(st: String) {
+        val name = Prefs.langName
+        when (st) {
+            "downloaded" -> { toastLong("${name}离线语音包已下载好，切到后台也能继续识别了"); switchToPiped() }
+            "pending", "scheduled", "requested" -> {
+                toastLong("正在下载${name}离线语音包。下好之前只能亮屏识别，下好后自动切换")
+                if (Hub.running && mode == "phone") Hub.status = "手机识别（亮屏时可用，${name}离线包下载中）"
+                main.removeCallbacks(packPoll); main.postDelayed(packPoll, 45_000)
+                Hub.changed()
+            }
+            "missing", "unsupported" -> toastLong("手机的语音服务没有${name}离线识别，只能亮屏识别。想在后台识别，可以在设置里改用 Deepgram 或大模型")
+        }
+    }
+
+    /** the language pack is there now: recognize our own recording again, which also works in the background */
+    private fun switchToPiped() {
+        main.removeCallbacks(packPoll)
+        if (!(Hub.running && mode == "phone" && hold == null) || !phone.pipeSupported) return
+        if (phone.active && phone.piped) return
+        phone.stop()
+        if (!capture.running && !capture.start()) return
+        phone.pauseMs = Prefs.pause
+        phone.start(Prefs.recLang, true)
+        feedPhone = true
+        Hub.status = "手机识别"
+        updateNotification(); Hub.changed()
+    }
+
     private fun showCloudLive() {
         if (hold != null) return
-        Hub.live = Txt.combine(pvText, pvInterim)
         Hub.liveLabel = if (speaking) "正在听…" else ""
+        setLive(Txt.combine(pvText, pvInterim))
         Hub.changed()
     }
 
     private fun showHoldLive() {
         val h = hold ?: return
-        Hub.live = Txt.combine(h.text, h.interim)
         if (!h.released) Hub.liveLabel = "正在听…松开后翻译"
+        setLive(Txt.combine(h.text, h.interim))
         Hub.changed()
     }
 
@@ -368,6 +491,7 @@ class ListenService : Service(), Vad.Listener, PhoneAsr.Callback, Deepgram.Callb
     private fun segmentReady(pcm: ShortArray) {
         if (!cloudCont) return
         speaking = false
+        if (phone.active) phone.cut() // the preview's sentence ends with this piece, so its final text comes now
         val e = addPlaceholder("")
         val fb = Fallback()
         main.postDelayed({
@@ -434,7 +558,9 @@ class ListenService : Service(), Vad.Listener, PhoneAsr.Callback, Deepgram.Callb
         val h = HoldState(SystemClock.elapsedRealtime(), eng)
         hold = h
         Hub.holding = true
-        if (!capture.running) capture.start()
+        // the phone recognizer that records by itself must not compete with our recording
+        val selfRecording = eng == "phone" && (if (phone.active) !phone.piped else !phone.pipeUsable(Prefs.recLang))
+        if (!capture.running && !selfRecording) capture.start()
         vad.beginHold()
         if (eng == "dg" && !dg.want) dg.start(Prefs.lang, Prefs.pause)
         syncPhone()
@@ -442,7 +568,9 @@ class ListenService : Service(), Vad.Listener, PhoneAsr.Callback, Deepgram.Callb
             val v = getSystemService(Vibrator::class.java)
             v?.vibrate(VibrationEffect.createOneShot(15, VibrationEffect.DEFAULT_AMPLITUDE))
         } catch (_: Exception) { }
-        Hub.live = ""; Hub.liveLabel = "正在听…松开后翻译"
+        main.removeCallbacks(stallRun)
+        prov = null
+        Hub.liveLabel = "正在听…松开后翻译"; setLive("")
         Hub.dl("按住说话 开始")
         updateNotification(); Hub.changed()
     }
@@ -463,7 +591,7 @@ class ListenService : Service(), Vad.Listener, PhoneAsr.Callback, Deepgram.Callb
             return
         }
         val waitPhone = phone.active
-        if (waitPhone) phone.finishSentence()
+        if (waitPhone) phone.cut()
         // the phone's final words for the held speech arrive a moment after release
         main.postDelayed({ commitHold(h, short) }, if (waitPhone) 900L else 30L)
     }
@@ -480,7 +608,7 @@ class ListenService : Service(), Vad.Listener, PhoneAsr.Callback, Deepgram.Callb
         } else {
             phone.stop(); feedPhone = false; capture.stop()
         }
-        Hub.live = ""; Hub.liveLabel = ""
+        Hub.liveLabel = ""; setLive("")
         if (h.eng == "cloud" && audio != null && audio.second >= 8 && Cloud.anyUsable()) {
             val fb = Fallback().apply { this.text = text; ready = true }
             submitCloud(addPlaceholder(text), audio.first, Prefs.lang, fb)
@@ -565,8 +693,8 @@ class ListenService : Service(), Vad.Listener, PhoneAsr.Callback, Deepgram.Callb
         phone.stop(); feedPhone = false
         if (pendingJobs == 0) dg.close()
         if (!dg.want) capture.stop()
-        Hub.live = ""; Hub.liveLabel = ""
-        Hub.changed()
+        main.removeCallbacks(stallRun)
+        Hub.liveLabel = ""; setLive("")
         if (pendingJobs > 0) return // finish the pieces still with the AI service first
         try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Exception) { }
         fg = false

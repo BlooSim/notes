@@ -224,6 +224,9 @@ class MainActivity : Activity() {
         }.setNegativeButton("取消", null).show()
     }
 
+    /** sets text only when it changed, so an unchanged view is not laid out again */
+    private fun put(tv: TextView, t: String) { if (tv.text.toString() != t) tv.text = t }
+
     private fun render(force: Boolean = false) {
         if (!::list.isInitialized) return
         val note = Store.current
@@ -249,16 +252,22 @@ class MainActivity : Activity() {
         // the line being heard right now
         val showLive = Hub.running || Hub.holding || Hub.liveLabel.isNotBlank()
         liveRow.root.visibility = if (showLive) View.VISIBLE else View.GONE
-        liveRow.no.text = note.nextNo().toString(); liveRow.no.setTextColor(p.faint)
-        liveRow.zh.text = Hub.liveLabel.ifBlank { "▍" }; liveRow.zh.setTextColor(p.accentInk)
-        liveRow.src.text = Hub.live; liveRow.src.visibility = if (Hub.live.isBlank()) View.GONE else View.VISIBLE
+        if (showLive) {
+            put(liveRow.no, note.nextNo().toString()); liveRow.no.setTextColor(p.faint)
+            // the quick translation of what is being said, or a caret until it arrives
+            val lz = Hub.liveZh
+            put(liveRow.zh, if (lz.isNotBlank()) lz else Hub.liveLabel.ifBlank { "▍" })
+            liveRow.zh.setTextColor(if (lz.isNotBlank()) p.muted else p.accentInk)
+            liveRow.zh.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, Prefs.fontSp.toFloat())
+            put(liveRow.src, Hub.live); liveRow.src.visibility = if (Hub.live.isBlank()) View.GONE else View.VISIBLE
+        }
 
-        tvTitle.text = note.displayTitle()
+        put(tvTitle, note.displayTitle())
         val c = note.entries.size
         val state = when { Hub.holding -> " · 按住中"; Hub.running -> " · 记录中"; else -> "" }
-        tvMeta.text = (if (c > 0) "$c 条" else "空白笔记") + state + (if ((Hub.running || Hub.holding) && Hub.status.isNotBlank()) "\n" + Hub.status else "")
-        chip.text = if (Prefs.lang == "en") "EN" else "日"
-        holdBtn.text = if (Hub.holding) "🎤 松开结束" else "🎤 按住"
+        put(tvMeta, (if (c > 0) "$c 条" else "空白笔记") + state + (if ((Hub.running || Hub.holding) && Hub.status.isNotBlank()) "\n" + Hub.status else ""))
+        put(chip, if (Prefs.lang == "en") "EN" else "日")
+        put(holdBtn, if (Hub.holding) "🎤 松开结束" else "🎤 按住")
         holdBtn.background = if (Hub.holding) Ui.round(p.accent, dp(22f).toFloat()) else Ui.round(p.sheet, dp(22f).toFloat(), dp(1f), p.rule)
         holdBtn.setTextColor(if (Hub.holding) p.onAccent else p.ink)
         fab.text = if (Hub.running) "❚❚" else "✎"

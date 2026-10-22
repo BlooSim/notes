@@ -30,6 +30,7 @@ class SettingsActivity : Activity() {
     private lateinit var keysOut: TextView
     private lateinit var dgOut: TextView
     private lateinit var testOut: TextView
+    private lateinit var packOut: TextView
     private lateinit var logView: TextView
     private val statusViews = mutableMapOf<String, TextView>()
     private val h = Handler(Looper.getMainLooper())
@@ -125,7 +126,13 @@ class SettingsActivity : Activity() {
         keysOut = hint("", llmBox)
         rule()
 
-        row("对方说的语言", seg(listOf("ja" to "日语", "en" to "英语"), { Prefs.lang }) { Prefs.lang = it; ListenService.send(this, ListenService.ACT_LANG) })
+        row("对方说的语言", seg(listOf("ja" to "日语", "en" to "英语"), { Prefs.lang }) { Prefs.lang = it; ListenService.send(this, ListenService.ACT_LANG); if (::packOut.isInitialized) pack(false) })
+        val pb = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        pb.addView(button("下载离线语音包") { pack(true) })
+        form.addView(pb)
+        packOut = hint("")
+        hint("用「手机」识别时，要有对方语言的离线语音包，切到后台和锁屏才能继续识别；没有的话只能亮屏识别。日语和英语各需要一个（切换语言后再点一次）。")
+        pack(false)
         row("停顿多久算一句", seg(listOf("800" to "短", "1300" to "中", "2000" to "长"), { Prefs.pause.toString() }) { Prefs.pause = it.toInt() })
         hint("对方说话慢、句子被切碎时调长；想更快出译文时调短。")
         row("字号", seg(listOf("15" to "小", "17" to "中", "20" to "大"), { Prefs.fontSp.toString() }) { Prefs.fontSp = it.toInt() })
@@ -288,6 +295,15 @@ class SettingsActivity : Activity() {
                     .setNegativeButton("取消", null).show()
             }
             .setNegativeButton("取消", null).show()
+    }
+
+    private fun pack(download: Boolean) {
+        val name = Prefs.langName
+        packOut.text = if (download) "正在请求下载${name}离线语音包…" else "正在查询${name}离线语音包…"
+        LangPack.check(this, Prefs.recLang, download) { st ->
+            packOut.text = LangPack.describe(st, name) + (if (download && (st == "requested" || st == "scheduled")) "。下载在后台进行，可能要几分钟，需要联网" else "")
+            Hub.dl("离线语言包 ${Prefs.recLang}：$st")
+        }
     }
 
     private fun testTranslate() {

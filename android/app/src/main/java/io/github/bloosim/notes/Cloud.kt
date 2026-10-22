@@ -36,9 +36,11 @@ object Http {
             val code = c.responseCode
             val stream = if (code in 200..299) c.inputStream else c.errorStream
             val text = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
+            // reading the reply to the end and not disconnecting lets the next request reuse the connection
             return Resp(code, text, c.getHeaderField("retry-after"))
-        } finally {
+        } catch (e: Exception) {
             c.disconnect()
+            throw e
         }
     }
 }
@@ -378,6 +380,7 @@ object Cloud {
  */
 object Tr {
     class Out(val zh: String?, val why: String)
+    class HttpErr(val code: Int) : IOException("HTTP $code")
 
     private const val UA = "Mozilla/5.0 (Linux; Android 15; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36"
 
@@ -391,13 +394,20 @@ object Tr {
     }
 
     private fun get(url: String): String {
-        val r = Http.call(url, "GET", mapOf("User-Agent" to UA, "Accept" to "application/json,text/plain,*/*"), null, null, 15000)
-        if (r.code !in 200..299) throw IOException("HTTP ${r.code}")
+        return get(url, 15000)
+    }
+
+    private fun get(url: String, timeout: Int): String {
+        val r = Http.call(url, "GET", mapOf("User-Agent" to UA, "Accept" to "application/json,text/plain,*/*"), null, null, timeout)
+        if (r.code !in 200..299) throw HttpErr(r.code)
         return r.text
     }
 
-    private fun gtx(text: String, sl: String): String {
-        val t = get("https://translate.googleapis.com/translate_a/single?client=gtx&dt=t&sl=$sl&tl=zh-CN&q=" + URLEncoder.encode(text.take(1500), "UTF-8"))
+    /** one fast try, for the live line; throws on failure */
+    fun quick(text: String, lang: String): String = gtx(text, if (lang == "en") "en" else "ja", 6000)
+
+    private fun gtx(text: String, sl: String, timeout: Int = 15000): String {
+        val t = get("https://translate.googleapis.com/translate_a/single?client=gtx&dt=t&sl=$sl&tl=zh-CN&q=" + URLEncoder.encode(text.take(1500), "UTF-8"), timeout)
         val segs = try { JSONArray(t).optJSONArray(0) } catch (e: Exception) { throw IOException("回复看不懂") } ?: throw IOException("空回复")
         val sb = StringBuilder()
         for (i in 0 until segs.length()) { val s = segs.optJSONArray(i); if (s != null && !s.isNull(0)) sb.append(s.optString(0)) }
