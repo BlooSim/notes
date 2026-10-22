@@ -328,6 +328,33 @@ object Cloud {
         return null
     }
 
+    /** Text-only translation with Gemini, used when the free translators are unreachable. Worker thread. */
+    fun translateText(text: String, lang: String): String? {
+        if (Prefs.gKey.isBlank() || cooling("g")) return null
+        val ln = if (lang == "en") "English" else "Japanese"
+        val prompt = "Translate this $ln sentence from a spoken conversation into natural Simplified Chinese. Reply with the translation only.\n\n$text"
+        for (model in orderModels("g", G_MODELS)) {
+            if (cooling("g:$model")) continue
+            val gen = JSONObject().put("temperature", 0)
+            if (noThink[model] != true) gen.put("thinkingConfig", JSONObject().put("thinkingBudget", 0))
+            val body = JSONObject().put("contents", JSONArray().put(JSONObject().put("role", "user").put("parts", JSONArray().put(JSONObject().put("text", prompt))))).put("generationConfig", gen)
+            try {
+                val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=" + URLEncoder.encode(Prefs.gKey, "UTF-8")
+                val txt = send(url, emptyMap(), body.toString().toByteArray(), "application/json")
+                val ps = JSONObject(txt).optJSONArray("candidates")?.optJSONObject(0)?.optJSONObject("content")?.optJSONArray("parts")
+                val sb = StringBuilder()
+                if (ps != null) for (i in 0 until ps.length()) sb.append(ps.optJSONObject(i)?.optString("text") ?: "")
+                val out = sb.toString().trim()
+                if (out.isNotEmpty()) return out
+            } catch (e: ApiErr) {
+                if (e.kind == "bad" && Regex("(?i)think").containsMatchIn(e.message ?: "")) { noThink[model] = true; continue }
+                if (e.kind == "key" || e.kind == "net") throw IOException(e.message)
+                setModelState("g:$model", e)
+            }
+        }
+        return null
+    }
+
     /** Checks one service with a second of near-silence. Returns a line for the settings screen. */
     fun check(p: Prov): String {
         clearFor(p.id, all = false)
@@ -345,34 +372,89 @@ object Cloud {
     }
 }
 
-/** Google Translate for text that the AI service did not translate itself. */
+/**
+ * Text translation for lines the AI service did not translate itself. Several free routes are tried in
+ * order, so one of them being blocked or down does not leave the line untranslated.
+ */
 object Tr {
-    private fun gtx(text: String, sl: String): String {
-        val url = "https://translate.googleapis.com/translate_a/single?client=gtx&dt=t&sl=$sl&tl=zh-CN&q=" + URLEncoder.encode(text.take(1500), "UTF-8")
-        val r = Http.call(url, "GET", emptyMap(), null, null, 20000)
+    class Out(val zh: String?, val why: String)
+
+    private const val UA = "Mozilla/5.0 (Linux; Android 15; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36"
+
+    fun netWhy(e: Throwable): String = when (e) {
+        is java.net.UnknownHostException -> "连不上网络"
+        is java.net.SocketTimeoutException -> "网络超时"
+        is java.net.ConnectException -> "连接被拒绝"
+        is javax.net.ssl.SSLException -> "安全连接失败"
+        is IOException -> e.message?.take(40) ?: e.javaClass.simpleName
+        else -> e.javaClass.simpleName + (e.message?.let { "：" + it.take(40) } ?: "")
+    }
+
+    private fun get(url: String): String {
+        val r = Http.call(url, "GET", mapOf("User-Agent" to UA, "Accept" to "application/json,text/plain,*/*"), null, null, 15000)
         if (r.code !in 200..299) throw IOException("HTTP ${r.code}")
-        val segs = JSONArray(r.text).optJSONArray(0) ?: throw IOException("empty")
+        return r.text
+    }
+
+    private fun gtx(text: String, sl: String): String {
+        val t = get("https://translate.googleapis.com/translate_a/single?client=gtx&dt=t&sl=$sl&tl=zh-CN&q=" + URLEncoder.encode(text.take(1500), "UTF-8"))
+        val segs = try { JSONArray(t).optJSONArray(0) } catch (e: Exception) { throw IOException("回复看不懂") } ?: throw IOException("空回复")
         val sb = StringBuilder()
         for (i in 0 until segs.length()) { val s = segs.optJSONArray(i); if (s != null && !s.isNull(0)) sb.append(s.optString(0)) }
         val out = sb.toString().trim()
-        if (out.isEmpty()) throw IOException("empty")
+        if (out.isEmpty()) throw IOException("空回复")
+        return out
+    }
+
+    private fun unescape(s: String) = s.replace("&#39;", "'").replace("&quot;", "\"").replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+
+    /** the endpoint of Google's Chrome translate extension */
+    private fun dict(text: String, sl: String): String {
+        val t = get("https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=$sl&tl=zh-CN&q=" + URLEncoder.encode(text.take(1500), "UTF-8"))
+        val a = try { JSONArray(t) } catch (e: Exception) { throw IOException("回复看不懂") }
+        val f = a.opt(0)
+        val out = when (f) { is String -> f; is JSONArray -> f.optString(0); else -> "" }.trim()
+        if (out.isEmpty()) throw IOException("空回复")
+        return unescape(out)
+    }
+
+    private fun mymemory(text: String, sl: String): String {
+        val t = get("https://api.mymemory.translated.net/get?langpair=$sl%7Czh-CN&q=" + URLEncoder.encode(text.take(450), "UTF-8"))
+        val o = try { JSONObject(t) } catch (e: Exception) { throw IOException("回复看不懂") }
+        val out = o.optJSONObject("responseData")?.optString("translatedText")?.trim() ?: ""
+        if (out.isEmpty() || o.optInt("responseStatus", 200) != 200) throw IOException("没有结果")
         return out
     }
 
     /** Worker thread. The previous sentence goes along as context; only the new sentence's translation is kept. */
-    fun translate(text: String, prev: String, lang: String): String? {
+    fun translate(text: String, prev: String, lang: String): Out {
         val q = Txt.forTranslate(text, lang)
-        if (q.isEmpty()) return "（嗯…）"
+        if (q.isEmpty()) return Out("（嗯…）", "")
         val sl = if (lang == "en") "en" else "ja"
+        val errs = LinkedHashMap<String, String>()
         if (prev.isNotBlank()) {
             try {
                 val parts = gtx(prev + "\n" + q, sl).split("\n").map { it.trim() }.filter { it.isNotEmpty() }
-                if (parts.size == 2) return parts[1]
-            } catch (_: Exception) { }
+                if (parts.size == 2) return Out(parts[1], "")
+            } catch (e: Exception) { errs["Google"] = netWhy(e) }
         }
-        repeat(2) {
-            try { return gtx(q, sl) } catch (_: Exception) { try { Thread.sleep(500) } catch (_: InterruptedException) { } }
+        val routes = listOf<Pair<String, () -> String>>(
+            "Google" to { gtx(q, sl) },
+            "Google2" to { dict(q, sl) },
+            "MyMemory" to { mymemory(q, sl) },
+            "Gemini" to { Cloud.translateText(q, lang) ?: throw IOException("没有可用的 Key") }
+        )
+        for ((name, run) in routes) {
+            if (name == "Gemini" && Prefs.gKey.isBlank()) continue
+            try { return Out(run(), "") } catch (e: Exception) { errs[name] = netWhy(e) }
         }
-        return null
+        val detail = errs.entries.joinToString("；") { it.key + " " + it.value }
+        Hub.dl("翻译失败：$detail")
+        val why = when {
+            errs.values.all { it == "连不上网络" } -> "连不上网络"
+            errs.values.any { it.startsWith("HTTP") } -> "翻译服务拒绝了请求"
+            else -> errs.values.firstOrNull() ?: "未知原因"
+        }
+        return Out(null, why)
     }
 }

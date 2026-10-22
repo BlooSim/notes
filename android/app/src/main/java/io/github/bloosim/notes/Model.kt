@@ -21,6 +21,9 @@ class Entry(
     var st: String,
     var by: String = ""
 ) {
+    /** why the last translation failed (shown on the line, not saved) */
+    var why: String = ""
+
     fun toJson(): JSONObject = JSONObject().put("n", n).put("src", src).put("zh", zh)
         .put("lang", lang).put("ts", ts).put("st", st).put("by", by)
 
@@ -112,6 +115,28 @@ object Store {
         return n
     }
 
+    fun noteOf(e: Entry): Note? = notes.firstOrNull { n -> n.entries.any { it === e } }
+
+    /** removes one line; the lines after it move up a number */
+    fun removeEntry(e: Entry): Boolean {
+        val note = noteOf(e) ?: return false
+        val i = note.entries.indexOfFirst { it === e }
+        if (i < 0) return false
+        note.entries.removeAt(i)
+        for (j in i until note.entries.size) note.entries[j].n--
+        save(); Hub.changed()
+        return true
+    }
+
+    fun deleteNotes(list: Collection<Note>) {
+        val gone = list.map { it.id }.toSet()
+        notes.removeAll { it.id in gone }
+        if (current.id in gone) {
+            current = notes.firstOrNull() ?: Note.create().also { notes.add(0, it) }
+        }
+        save(); Hub.changed()
+    }
+
     private var pending = false
     fun save() {
         if (pending) return
@@ -150,11 +175,12 @@ object Prefs {
     var lang: String get() = s("lang", "ja"); set(v) = ps("lang", v)
     /** silence that ends a sentence, ms */
     var pause: Int get() = i("pause", 1300); set(v) = pi("pause", v)
-    /** "llm" = AI services first, "phone" = phone recognizer only */
+    /** "llm" = AI services first, "dg" = Deepgram live streaming, "phone" = phone recognizer only */
     var engine: String get() = s("engine", "llm"); set(v) = ps("engine", v)
     var gKey: String get() = s("gKey", ""); set(v) = ps("gKey", v)
     var qKey: String get() = s("qKey", ""); set(v) = ps("qKey", v)
     var mKey: String get() = s("mKey", ""); set(v) = ps("mKey", v)
+    var dgKey: String get() = s("dgKey", ""); set(v) = ps("dgKey", v)
     /** continuous translation also goes through the AI services (uses more of the free quota) */
     var llmCont: Boolean get() = b("llmCont", true); set(v) = pb("llmCont", v)
     /** run the phone recognizer next to the AI services, for the live line and as a fallback */
@@ -204,7 +230,7 @@ object Hub {
         val run = Runnable {
             val c = Calendar.getInstance()
             log.addLast(String.format("%02d:%02d:%02d %s", c.get(Calendar.HOUR_OF_DAY), c.get(Calendar.MINUTE), c.get(Calendar.SECOND), msg))
-            while (log.size > 80) log.removeFirst()
+            while (log.size > 120) log.removeFirst()
             changed()
         }
         if (Looper.myLooper() == Looper.getMainLooper()) run.run() else main.post(run)
@@ -216,6 +242,14 @@ object Txt {
     private val NORM = Regex("[\\s。、，,.．！!？?「」『』…]")
     fun clean(s: String?) = (s ?: "").replace(WS, " ").trim()
     fun norm(s: String?) = (s ?: "").replace(NORM, "").lowercase()
+
+    /** join two consecutive pieces of speech (Japanese without a space) */
+    fun join(a: String, b: String, lang: String): String = when {
+        a.isBlank() -> b
+        b.isBlank() -> a
+        lang == "en" -> "$a $b"
+        else -> a + b
+    }
 
     /** join two pieces of what was heard, without repeating text the phone sent twice */
     fun combine(a: String, b: String): String {

@@ -75,7 +75,7 @@ object Ui {
             when {
                 e.zh.isNotBlank() -> { zh.text = e.zh; zh.setTextColor(if (e.st == "wait") p.muted else p.ink) }
                 e.st == "asr" -> { zh.text = "识别中…"; zh.setTextColor(p.faint) }
-                e.st == "err" -> { zh.text = "翻译没成功，点这里重试"; zh.setTextColor(p.danger) }
+                e.st == "err" -> { zh.text = "翻译没成功" + (if (e.why.isNotBlank()) "（${e.why}）" else "") + "，点这里重试"; zh.setTextColor(p.danger) }
                 else -> { zh.text = "···"; zh.setTextColor(p.faint) }
             }
             src.text = e.src

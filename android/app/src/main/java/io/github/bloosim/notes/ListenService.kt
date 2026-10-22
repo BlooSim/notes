@@ -26,10 +26,12 @@ import java.util.concurrent.Executors
  *
  * Continuous translation, AI mode: our recording is cut at pauses; each piece goes to the AI services;
  *   the phone recognizer runs alongside for the live line and as a fallback.
+ * Continuous translation, Deepgram mode: our recording is streamed to Deepgram; each sentence it sends
+ *   back becomes a line. If Deepgram cannot be used, the phone recognizer takes over.
  * Continuous translation, phone mode: every sentence from the phone recognizer becomes a line.
  * Hold to talk: everything said while the button is held becomes one line.
  */
-class ListenService : Service(), Vad.Listener, PhoneAsr.Callback {
+class ListenService : Service(), Vad.Listener, PhoneAsr.Callback, Deepgram.Callback {
     companion object {
         const val ACT_START = "start"
         const val ACT_STOP = "stop"
@@ -58,7 +60,8 @@ class ListenService : Service(), Vad.Listener, PhoneAsr.Callback {
         }
     }
 
-    private class HoldState(val t0: Long) {
+    /** [eng]: "cloud", "dg" or "phone" */
+    private class HoldState(val t0: Long, var eng: String) {
         var text = ""
         var interim = ""
         var released = false
@@ -76,11 +79,17 @@ class ListenService : Service(), Vad.Listener, PhoneAsr.Callback {
     private lateinit var capture: Capture
     private lateinit var vad: Vad
     private lateinit var phone: PhoneAsr
+    private lateinit var dg: Deepgram
     private var overlay: Overlay? = null
     private val cloudExec = Executors.newSingleThreadExecutor()
     private val trExec = Executors.newFixedThreadPool(2)
     private var fg = false
-    private var cloudCont = false
+    /** how continuous translation works right now: "cloud", "dg" or "phone" */
+    private var mode = "phone"
+    private val cloudCont: Boolean get() = mode == "cloud"
+    /** a Deepgram key that just failed is not tried again for a while */
+    private var dgBadKey = ""
+    private var dgBadAt = 0L
     private var pvText = ""
     private var pvInterim = ""
     private var speaking = false
@@ -96,7 +105,8 @@ class ListenService : Service(), Vad.Listener, PhoneAsr.Callback {
         Store.init(this)
         capture = Capture { f, rms -> onFrame(f, rms) }
         vad = Vad(this)
-        phone = PhoneAsr(this, this)
+        phone = PhoneAsr(this, this) { vad.lastVoiceAt }
+        dg = Deepgram(this)
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(NotificationChannel(CH, "听写", NotificationManager.IMPORTANCE_LOW).apply { setShowBadge(false) })
     }
@@ -113,6 +123,7 @@ class ListenService : Service(), Vad.Listener, PhoneAsr.Callback {
         overlay?.hide(); overlay = null
         Hub.overlayOn = false
         phone.destroy()
+        dg.close()
         capture.stop()
         Hub.running = false; Hub.holding = false; Hub.live = ""; Hub.liveLabel = ""
         instance = null
@@ -129,7 +140,10 @@ class ListenService : Service(), Vad.Listener, PhoneAsr.Callback {
             ACT_HOLD_UP -> holdUp()
             ACT_OVERLAY -> toggleOverlay()
             ACT_EXIT -> exit()
-            ACT_LANG -> if (phone.active) phone.start(Prefs.recLang, phone.piped)
+            ACT_LANG -> {
+                if (phone.active) phone.start(Prefs.recLang, phone.piped)
+                if (dg.want) dg.start(Prefs.lang, Prefs.pause)
+            }
         }
     }
 
@@ -154,25 +168,35 @@ class ListenService : Service(), Vad.Listener, PhoneAsr.Callback {
 
     private fun onFrame(f: ShortArray, rms: Float) { // capture thread
         vad.frame(f, rms)
-        if (feedPhone) {
+        val toDg = dg.want
+        if (feedPhone || toDg) {
             val b = ByteArray(f.size * 2)
             for (i in f.indices) { val v = f[i].toInt(); b[2 * i] = v.toByte(); b[2 * i + 1] = (v shr 8).toByte() }
-            phone.feed(b)
+            if (feedPhone) phone.feed(b)
+            if (toDg) dg.feed(b)
         }
     }
 
     private fun holdUsesCloud() = Prefs.engine == "llm" && Cloud.anyKey()
 
-    private fun wantPhone(): Boolean = when {
-        hold != null -> Prefs.phonePreview || !holdUsesCloud()
-        Hub.running -> !cloudCont || Prefs.phonePreview
-        else -> false
+    private fun dgUsable(): Boolean {
+        val k = Prefs.dgKey
+        if (Prefs.engine != "dg" || k.isBlank()) return false
+        return !(k == dgBadKey && SystemClock.elapsedRealtime() - dgBadAt < 10 * 60_000L)
+    }
+
+    private fun wantPhone(): Boolean {
+        val h = hold
+        if (h != null) return h.eng == "phone" || (h.eng == "cloud" && Prefs.phonePreview)
+        if (Hub.running) return mode == "phone" || (mode == "cloud" && Prefs.phonePreview)
+        return false
     }
 
     /** start or stop the phone recognizer to match what is going on */
     private fun syncPhone() {
         if (!wantPhone()) { if (phone.active) phone.stop(); feedPhone = false; return }
         if (phone.active) return
+        phone.pauseMs = Prefs.pause
         if (phone.pipeSupported) {
             if (!capture.running) capture.start()
             if (capture.running) { phone.start(Prefs.recLang, true); feedPhone = true; return }
@@ -184,14 +208,23 @@ class ListenService : Service(), Vad.Listener, PhoneAsr.Callback {
     private fun startRun() {
         if (Hub.running) return
         if (!ensureForeground()) return
-        cloudCont = Prefs.engine == "llm" && Prefs.llmCont && Cloud.anyKey()
-        if (cloudCont && !capture.start()) { toast("打不开麦克风"); return }
+        mode = when {
+            dgUsable() -> "dg"
+            Prefs.engine == "llm" && Prefs.llmCont && Cloud.anyKey() -> "cloud"
+            else -> "phone"
+        }
+        if (mode != "phone" && !capture.start()) { toast("打不开麦克风"); return }
         vad.pauseMs = Prefs.pause
         vad.enabled = cloudCont
         pvText = ""; pvInterim = ""; speaking = false
         Hub.running = true
         Hub.live = ""; Hub.liveLabel = ""
-        Hub.status = if (cloudCont) (if (Cloud.anyUsable()) "大模型识别" else "大模型额度用完，正在用手机识别") else "手机识别"
+        Hub.status = when (mode) {
+            "cloud" -> if (Cloud.anyUsable()) "大模型识别" else "大模型额度用完，正在用手机识别"
+            "dg" -> if (dg.up) "Deepgram 识别" else "Deepgram 连接中…"
+            else -> if (Prefs.engine == "dg" && Prefs.dgKey.isNotBlank()) "Deepgram 暂时用不了，正在用手机识别" else "手机识别"
+        }
+        if (mode == "dg") dg.start(Prefs.lang, Prefs.pause)
         syncPhone()
         Hub.dl("开始连续翻译：" + Hub.status)
         updateNotification(); Hub.changed()
@@ -202,9 +235,20 @@ class ListenService : Service(), Vad.Listener, PhoneAsr.Callback {
         vad.flush() // the sentence being said when you stopped
         vad.enabled = false
         Hub.running = false
-        if (!cloudCont && Hub.live.isNotBlank()) commitPhone(Hub.live)
+        if (mode == "phone" && Hub.live.isNotBlank()) commitPhone(Hub.live)
         Hub.live = ""; Hub.liveLabel = ""; speaking = false
-        if (hold == null) { phone.stop(); feedPhone = false; capture.stop() }
+        if (hold == null) {
+            phone.stop(); feedPhone = false
+            if (mode == "dg" && dg.want) {
+                // Deepgram still has the last words; keep recording a moment until they come back
+                pendingJobs++
+                dg.finish {
+                    pendingJobs--
+                    if (!Hub.running && hold == null) { dg.close(); capture.stop() }
+                    maybeExit()
+                }
+            } else capture.stop()
+        }
         Hub.dl("暂停")
         updateNotification(); Hub.changed()
         maybeExit()
@@ -230,17 +274,54 @@ class ListenService : Service(), Vad.Listener, PhoneAsr.Callback {
         }
     }
 
+    // ---------- Deepgram ----------
+
+    override fun onDgLive(t: String) {
+        val h = hold
+        if (h != null && h.eng == "dg") { h.interim = t; showHoldLive(); return }
+        if (Hub.running && mode == "dg") { Hub.live = t; Hub.liveLabel = ""; Hub.changed() }
+    }
+
+    override fun onDgSentence(t: String) {
+        val h = hold
+        if (h != null && h.eng == "dg") { h.text = Txt.join(h.text, t, Prefs.lang); h.interim = ""; showHoldLive(); return }
+        addEntry(Txt.clean(t))
+    }
+
+    override fun onDgUp() {
+        if (Hub.running && mode == "dg") { Hub.status = "Deepgram 识别"; updateNotification(); Hub.changed() }
+    }
+
+    override fun onDgFail(reason: String) {
+        dgBadKey = Prefs.dgKey
+        dgBadAt = SystemClock.elapsedRealtime()
+        Hub.dl("Deepgram 停用：$reason")
+        toast("$reason，先用手机识别")
+        if (Hub.running && mode == "dg") {
+            mode = "phone"
+            Hub.status = "$reason，正在用手机识别"
+        }
+        hold?.let { if (it.eng == "dg") it.eng = "phone" }
+        if (Hub.running || hold != null) syncPhone()
+        updateNotification(); Hub.changed()
+    }
+
     override fun onGiveUp(reason: String) {
         val wasPiped = phone.piped
         feedPhone = false
-        val phoneOnly = (Hub.running && !cloudCont) || (hold != null && !holdUsesCloud())
-        if (wasPiped && phoneOnly && !(Hub.running && cloudCont)) {
+        val phoneOnly = (Hub.running && mode == "phone") || (hold?.eng == "phone")
+        if (wasPiped && phoneOnly && !(Hub.running && mode != "phone")) {
             // the recognizer ignored our recording: let it use the microphone itself (works while the screen is on)
-            Hub.dl("改用手机识别自己的麦克风：$reason")
+            Hub.dl("改用识别服务自己录音：$reason")
             if (hold == null) capture.stop()
-            if (!capture.running) { phone.start(Prefs.recLang, false); return }
+            if (!capture.running) {
+                Hub.status = "手机识别（亮屏时可用）"
+                phone.start(Prefs.recLang, false)
+                Hub.changed()
+                return
+            }
         }
-        if (Hub.running && !cloudCont && hold == null) { toast(reason); stopRun() }
+        if (Hub.running && mode == "phone" && hold == null) { toast(reason); stopRun() }
         else Hub.dl("手机识别停用：$reason")
     }
 
@@ -265,10 +346,11 @@ class ListenService : Service(), Vad.Listener, PhoneAsr.Callback {
         val note = Store.current
         val last = note.entries.lastOrNull()
         val now = System.currentTimeMillis()
-        if (last != null && now - last.ts < 15000 && last.st != "asr") {
+        // only a sentence the recognizer sends twice in a row counts as a repeat; the same words said again later are a new line
+        if (last != null && now - last.ts < 2500 && last.st != "asr") {
             val tn = Txt.norm(t); val ln = Txt.norm(last.src)
-            if (tn == ln || (tn.length >= 4 && ln.contains(tn))) return
-            if (ln.length >= 2 && tn.contains(ln)) { last.src = t; last.ts = now; translate(last); return }
+            if (tn == ln || (tn.length >= 6 && ln.contains(tn))) return
+            if (ln.length >= 4 && tn.startsWith(ln)) { last.src = t; last.ts = now; translate(last); return }
         }
         addEntry(t)
     }
@@ -347,11 +429,14 @@ class ListenService : Service(), Vad.Listener, PhoneAsr.Callback {
     private fun holdDown() {
         if (hold != null) return
         if (!ensureForeground()) return
-        val h = HoldState(SystemClock.elapsedRealtime())
+        val eng = when { dgUsable() -> "dg"; holdUsesCloud() -> "cloud"; else -> "phone" }
+        if (eng == "dg" && dg.want) dg.commit() // what was said before the press stays its own line
+        val h = HoldState(SystemClock.elapsedRealtime(), eng)
         hold = h
         Hub.holding = true
         if (!capture.running) capture.start()
         vad.beginHold()
+        if (eng == "dg" && !dg.want) dg.start(Prefs.lang, Prefs.pause)
         syncPhone()
         try {
             val v = getSystemService(Vibrator::class.java)
@@ -371,6 +456,12 @@ class ListenService : Service(), Vad.Listener, PhoneAsr.Callback {
         val short = SystemClock.elapsedRealtime() - h.t0 < 500
         Hub.liveLabel = "正在整理这一段…"
         Hub.changed()
+        if (h.eng == "dg") {
+            // Deepgram sends the last words of the held speech a moment after release
+            pendingJobs++
+            dg.finish { pendingJobs--; commitHold(h, short) }
+            return
+        }
         val waitPhone = phone.active
         if (waitPhone) phone.finishSentence()
         // the phone's final words for the held speech arrive a moment after release
@@ -380,16 +471,21 @@ class ListenService : Service(), Vad.Listener, PhoneAsr.Callback {
     private fun commitHold(h: HoldState, short: Boolean) {
         if (hold !== h) return
         hold = null
-        val text = Txt.clean(Txt.combine(h.text, h.interim))
+        val text = Txt.clean(if (h.eng == "dg") Txt.join(h.text, h.interim, Prefs.lang) else Txt.combine(h.text, h.interim))
         val audio = h.audio
-        if (Hub.running) syncPhone() else { phone.stop(); feedPhone = false; if (!cloudCont || !Hub.running) capture.stop() }
-        if (Hub.running && cloudCont && !capture.running) capture.start()
+        if (dg.want && !(Hub.running && mode == "dg")) dg.close()
+        if (Hub.running) {
+            if (mode != "phone" && !capture.running) capture.start()
+            syncPhone()
+        } else {
+            phone.stop(); feedPhone = false; capture.stop()
+        }
         Hub.live = ""; Hub.liveLabel = ""
-        if (audio != null && audio.second >= 8 && holdUsesCloud() && Cloud.anyUsable()) {
+        if (h.eng == "cloud" && audio != null && audio.second >= 8 && Cloud.anyUsable()) {
             val fb = Fallback().apply { this.text = text; ready = true }
             submitCloud(addPlaceholder(text), audio.first, Prefs.lang, fb)
         } else if (text.isNotBlank()) {
-            if (holdUsesCloud() && audio != null && !Cloud.anyUsable()) { Hub.status = "大模型额度用完，正在用手机识别"; noteFallback() }
+            if (h.eng == "cloud" && audio != null && !Cloud.anyUsable()) { Hub.status = "大模型额度用完，正在用手机识别"; noteFallback() }
             addEntry(text)
         } else {
             toast(if (short) "要按住不放，等对方说完再松开" else "这一段没有听到内容")
@@ -400,7 +496,7 @@ class ListenService : Service(), Vad.Listener, PhoneAsr.Callback {
 
     // ---------- lines ----------
 
-    private fun noteOf(e: Entry): Note? = Store.notes.firstOrNull { n -> n.entries.any { it === e } }
+    private fun noteOf(e: Entry): Note? = Store.noteOf(e)
 
     private fun addEntry(src: String): Entry {
         val note = Store.current
@@ -419,14 +515,7 @@ class ListenService : Service(), Vad.Listener, PhoneAsr.Callback {
         return e
     }
 
-    private fun removeEntry(e: Entry) {
-        val note = noteOf(e) ?: return
-        val i = note.entries.indexOfFirst { it === e }
-        if (i < 0) return
-        note.entries.removeAt(i)
-        for (j in i until note.entries.size) note.entries[j].n--
-        Store.save(); Hub.changed()
-    }
+    private fun removeEntry(e: Entry) { Store.removeEntry(e) }
 
     private fun contextFor(e: Entry): String {
         val note = noteOf(e) ?: return ""
@@ -444,10 +533,10 @@ class ListenService : Service(), Vad.Listener, PhoneAsr.Callback {
         val lang = e.lang
         Hub.changed()
         trExec.execute {
-            val zh = try { Tr.translate(src, prev, lang) } catch (x: Exception) { null }
+            val r = try { Tr.translate(src, prev, lang) } catch (x: Exception) { Tr.Out(null, Tr.netWhy(x)) }
             main.post {
                 if (e.src != src) return@post // the line changed meanwhile; a newer translation is on its way
-                if (zh != null) { e.zh = zh; e.st = "ok" } else e.st = "err"
+                if (r.zh != null) { e.zh = r.zh; e.st = "ok"; e.why = "" } else { e.st = "err"; e.why = r.why }
                 Store.save(); Hub.changed()
             }
         }
@@ -474,7 +563,8 @@ class ListenService : Service(), Vad.Listener, PhoneAsr.Callback {
         hold = null; Hub.holding = false
         overlay?.hide(); overlay = null; Hub.overlayOn = false
         phone.stop(); feedPhone = false
-        capture.stop()
+        if (pendingJobs == 0) dg.close()
+        if (!dg.want) capture.stop()
         Hub.live = ""; Hub.liveLabel = ""
         Hub.changed()
         if (pendingJobs > 0) return // finish the pieces still with the AI service first

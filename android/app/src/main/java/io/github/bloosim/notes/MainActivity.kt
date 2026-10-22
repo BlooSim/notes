@@ -107,7 +107,8 @@ class MainActivity : Activity() {
             "点右下角的 ✎ 开始连续翻译：对方每说完一段，这里就多一条带编号的中文，下面的小字是原文。\n\n" +
                 "也可以按住「按住」按钮：对方开始说话时按下，说完松开，这一整段变成一条翻译。\n\n" +
                 "右上角「浮窗」可以把字幕浮在其他应用上面；切到后台或锁屏也会继续听写。\n\n" +
-                "大模型识别更准：在「⋯」设置里填一个免费的 Gemini Key。",
+                "长按某一条可以复制、重新翻译或删除。\n\n" +
+                "想识别得更准：在「⋯」设置里选「大模型」（填免费的 Gemini Key）或「Deepgram」。",
             15f, p.muted
         ).apply { setLineSpacing(0f, 1.3f); setPadding(dp(4f), dp(16f), 0, 0) }
         list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -155,6 +156,7 @@ class MainActivity : Activity() {
         if (Hub.running) { ListenService.send(this, ListenService.ACT_STOP); return }
         if (!hasMic()) { askPermissions(); return }
         if (Prefs.engine == "llm" && !Cloud.anyKey()) toast("还没有填写大模型 Key，先用手机识别")
+        if (Prefs.engine == "dg" && Prefs.dgKey.isBlank()) toast("还没有填写 Deepgram Key，先用手机识别")
         ListenService.send(this, ListenService.ACT_START)
     }
 
@@ -193,12 +195,33 @@ class MainActivity : Activity() {
     private fun retry(e: Entry) {
         val svc = ListenService.instance
         if (svc != null) { svc.translate(e); return }
-        e.st = "wait"; render()
+        e.st = "wait"; e.why = ""; render()
         val src = e.src; val lang = e.lang
         Thread {
-            val zh = try { Tr.translate(src, "", lang) } catch (x: Exception) { null }
-            runOnUiThread { if (zh != null) { e.zh = zh; e.st = "ok" } else e.st = "err"; Store.save(); render() }
+            val r = try { Tr.translate(src, "", lang) } catch (x: Exception) { Tr.Out(null, Tr.netWhy(x)) }
+            runOnUiThread {
+                if (e.src == src) { if (r.zh != null) { e.zh = r.zh; e.st = "ok"; e.why = "" } else { e.st = "err"; e.why = r.why } }
+                Store.save(); render()
+            }
         }.start()
+    }
+
+    /** long press on a line: copy, translate again, delete */
+    private fun lineMenu(e: Entry) {
+        val items = arrayOf("复制这一条", "重新翻译", "删除这一条")
+        AlertDialog.Builder(this).setTitle("第 ${e.n} 条").setItems(items) { _, which ->
+            when (which) {
+                0 -> {
+                    getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("笔记", "${e.n}. ${e.zh}\n${e.src}"))
+                    toast("已复制第 ${e.n} 条")
+                }
+                1 -> retry(e)
+                2 -> {
+                    val n = e.n
+                    if (Store.removeEntry(e)) { render(); toast("已删除第 $n 条，后面的编号已前移") }
+                }
+            }
+        }.setNegativeButton("取消", null).show()
     }
 
     private fun render(force: Boolean = false) {
@@ -215,10 +238,7 @@ class MainActivity : Activity() {
                 r = Ui.Row(this, p)
                 r.root.setPadding(0, dp(8f), 0, dp(8f))
                 r.root.setOnClickListener { if (e.st == "err") retry(e) }
-                r.root.setOnLongClickListener {
-                    getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("笔记", "${e.n}. ${e.zh}\n${e.src}"))
-                    toast("已复制第 ${e.n} 条"); true
-                }
+                r.root.setOnLongClickListener { lineMenu(e); true }
                 rows[e] = r
                 list.addView(r.root, i.coerceAtMost(list.childCount))
             }

@@ -26,7 +26,10 @@ class SettingsActivity : Activity() {
     private lateinit var p: Pal
     private lateinit var form: LinearLayout
     private lateinit var llmBox: LinearLayout
+    private lateinit var dgBox: LinearLayout
     private lateinit var keysOut: TextView
+    private lateinit var dgOut: TextView
+    private lateinit var testOut: TextView
     private lateinit var logView: TextView
     private val statusViews = mutableMapOf<String, TextView>()
     private val h = Handler(Looper.getMainLooper())
@@ -95,10 +98,19 @@ class SettingsActivity : Activity() {
     private fun build() {
         title("设置")
 
-        row("识别方式", seg(listOf("llm" to "大模型", "phone" to "手机"), { Prefs.engine }) { Prefs.engine = it; llmBox.visibility = if (it == "llm") View.VISIBLE else View.GONE; if (Hub.running) toast("暂停后重新开始生效") })
+        row("识别方式", seg(listOf("llm" to "大模型", "dg" to "Deepgram", "phone" to "手机"), { Prefs.engine }) {
+            Prefs.engine = it
+            llmBox.visibility = if (it == "llm") View.VISIBLE else View.GONE
+            dgBox.visibility = if (it == "dg") View.VISIBLE else View.GONE
+            if (Hub.running) toast("暂停后重新开始生效")
+        })
         llmBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         form.addView(llmBox)
         llmBox.visibility = if (Prefs.engine == "llm") View.VISIBLE else View.GONE
+        dgBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        form.addView(dgBox)
+        dgBox.visibility = if (Prefs.engine == "dg") View.VISIBLE else View.GONE
+        buildDeepgram()
         hint("大模型识别更准，填一个 Key 就能用。填多个时，一个额度用完会自动换下一个；全都用不了时，自动改用手机识别。", llmBox)
         provider("g", "Gemini", "效果最好：识别和翻译一次完成。用 Google 账号免费创建，不要绑定付款方式。", "去 Google AI Studio 创建 Key", "https://aistudio.google.com/apikey")
         provider("q", "Groq", "免费的 Whisper 识别，速度很快，作为备用。", "去 Groq 创建 Key", "https://console.groq.com/keys")
@@ -140,12 +152,61 @@ class SettingsActivity : Activity() {
         b2.addView(View(this), LinearLayout.LayoutParams(dp(10f), 1))
         b2.addView(button("分享") { share() })
         form.addView(b2)
+        gap(h = 8f)
+        val b3 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        b3.addView(button("删除笔记…") { deleteNotes() })
+        form.addView(b3)
+        hint("删除某一条：在主界面长按那一条。")
         rule()
 
         val ver = try { packageManager.getPackageInfo(packageName, 0).versionName } catch (_: Exception) { "?" }
         hint("版本 $ver · 识别和翻译需要联网 · 笔记只保存在这台手机上")
+        val b4 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        b4.addView(button("测试翻译") { testTranslate() })
+        b4.addView(View(this), LinearLayout.LayoutParams(dp(10f), 1))
+        b4.addView(button("复制诊断记录") {
+            val cm = getSystemService(android.content.ClipboardManager::class.java)
+            cm.setPrimaryClip(android.content.ClipData.newPlainText("诊断记录", "版本 $ver\n" + Hub.log.joinToString("\n")))
+            toast("已复制，可以粘贴给别人看")
+        })
+        form.addView(b4)
+        testOut = hint("")
         logView = Ui.text(this, "", 11f, p.muted).apply { typeface = android.graphics.Typeface.MONOSPACE; setTextIsSelectable(true) }
         form.addView(logView)
+    }
+
+    private fun keyField(current: String, name: String, onChange: (String) -> Unit) = EditText(this).apply {
+        setText(current)
+        hint = "粘贴 $name API Key"
+        inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        setSingleLine()
+        textSize = 15f
+        setTextColor(p.ink); setHintTextColor(p.faint)
+        background = Ui.round(p.sheet, dp(9f).toFloat(), dp(1f), p.rule)
+        setPadding(dp(10f), dp(9f), dp(10f), dp(9f))
+        addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun afterTextChanged(s: Editable?) { onChange((s?.toString() ?: "").replace(Regex("\\s+"), "")) }
+        })
+    }
+
+    private fun buildDeepgram() {
+        hint("Deepgram 边听边出字，一句说完马上分好，连续翻译最流畅；在后台和锁屏时也能用。新注册送免费额度，不用绑卡。", dgBox)
+        val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.BOTTOM; setPadding(0, dp(10f), 0, dp(4f)) }
+        head.addView(Ui.text(this, "Deepgram", 15f, p.ink, true), LinearLayout.LayoutParams(0, -2, 1f))
+        dgBox.addView(head)
+        dgBox.addView(keyField(Prefs.dgKey, "Deepgram") { Prefs.dgKey = it; dgOut.text = "" }, LinearLayout.LayoutParams(-1, -2))
+        link("去 Deepgram 注册并创建 Key", "https://console.deepgram.com/signup", dgBox)
+        val kb = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        kb.addView(button("检查 Key 能不能用") {
+            val k = Prefs.dgKey
+            dgOut.text = "正在检查…"
+            Thread { val r = Deepgram.check(k); runOnUiThread { dgOut.text = r } }.start()
+        })
+        dgBox.addView(kb)
+        dgOut = hint("", dgBox)
+        hint("Deepgram 用不了（Key 错误、余额用完、连不上）时，会自动改用手机识别。", dgBox)
     }
 
     private fun provider(id: String, name: String, about: String, linkText: String, url: String) {
@@ -155,25 +216,10 @@ class SettingsActivity : Activity() {
         head.addView(st)
         statusViews[id] = st
         llmBox.addView(head)
-        val et = EditText(this).apply {
-            setText(Cloud.PROV.first { it.id == id }.key())
-            hint = "粘贴 $name API Key"
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-            setSingleLine()
-            textSize = 15f
-            setTextColor(p.ink); setHintTextColor(p.faint)
-            background = Ui.round(p.sheet, dp(9f).toFloat(), dp(1f), p.rule)
-            setPadding(dp(10f), dp(9f), dp(10f), dp(9f))
-            addTextChangedListener(object : TextWatcher {
-                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-                override fun afterTextChanged(s: Editable?) {
-                    val v = (s?.toString() ?: "").replace(Regex("\\s+"), "")
-                    when (id) { "g" -> Prefs.gKey = v; "q" -> Prefs.qKey = v; else -> Prefs.mKey = v }
-                    Cloud.clearFor(id)
-                    paintStatus()
-                }
-            })
+        val et = keyField(Cloud.PROV.first { it.id == id }.key(), name) { v ->
+            when (id) { "g" -> Prefs.gKey = v; "q" -> Prefs.qKey = v; else -> Prefs.mKey = v }
+            Cloud.clearFor(id)
+            paintStatus()
         }
         llmBox.addView(et, LinearLayout.LayoutParams(-1, -2))
         hint(about, llmBox)
@@ -188,7 +234,7 @@ class SettingsActivity : Activity() {
                 setTextColor(when { t.startsWith("可用") -> p.accentInk; t.contains("无效") || t.contains("没有能用") -> p.danger; else -> p.muted })
             }
         }
-        logView.text = if (Hub.log.isEmpty()) "" else "诊断记录：\n" + Hub.log.toList().takeLast(30).joinToString("\n")
+        logView.text = if (Hub.log.isEmpty()) "" else "诊断记录：\n" + Hub.log.toList().takeLast(50).joinToString("\n")
     }
 
     private fun checkKeys() {
@@ -225,6 +271,37 @@ class SettingsActivity : Activity() {
         AlertDialog.Builder(this).setTitle("历史笔记").setItems(labels) { _, i ->
             Store.current = notes[i]; Store.save(); Hub.changed(); toast("已打开：" + notes[i].displayTitle()); finish()
         }.setNegativeButton("关闭", null).show()
+    }
+
+    private fun deleteNotes() {
+        val notes = Store.notes.filter { it.entries.isNotEmpty() || it === Store.current }
+        if (notes.isEmpty()) { toast("没有笔记"); return }
+        val labels = notes.map { n -> (if (n === Store.current) "● " else "") + n.displayTitle() + "  (" + n.entries.size + " 条)" }.toTypedArray()
+        val picked = BooleanArray(notes.size)
+        AlertDialog.Builder(this).setTitle("选择要删除的笔记")
+            .setMultiChoiceItems(labels, picked) { _, i, on -> picked[i] = on }
+            .setPositiveButton("删除") { _, _ ->
+                val gone = notes.filterIndexed { i, _ -> picked[i] }
+                if (gone.isEmpty()) { toast("没有选择"); return@setPositiveButton }
+                AlertDialog.Builder(this).setTitle("删除 ${gone.size} 条笔记？").setMessage("删除后不能恢复。")
+                    .setPositiveButton("删除") { _, _ -> Store.deleteNotes(gone); toast("已删除 ${gone.size} 条笔记") }
+                    .setNegativeButton("取消", null).show()
+            }
+            .setNegativeButton("取消", null).show()
+    }
+
+    private fun testTranslate() {
+        val lang = Prefs.lang
+        val sample = if (lang == "en") "Thank you for coming today." else "今日は来てくれてありがとうございます。"
+        testOut.text = "正在测试翻译…"
+        Thread {
+            val t0 = System.currentTimeMillis()
+            val r = try { Tr.translate(sample, "", lang) } catch (x: Exception) { Tr.Out(null, Tr.netWhy(x)) }
+            val ms = System.currentTimeMillis() - t0
+            runOnUiThread {
+                testOut.text = if (r.zh != null) "翻译正常 ✓（$ms 毫秒）：$sample → ${r.zh}" else "翻译失败：${r.why}。详细原因见下面的诊断记录。"
+            }
+        }.start()
     }
 
     private fun share() {
