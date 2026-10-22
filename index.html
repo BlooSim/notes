@@ -63,7 +63,7 @@ svg { display: block; }
   border-bottom: 1px solid transparent; transition: border-color .2s;
 }
 .bar.scrolled { border-bottom-color: var(--rule); }
-.bar-in { display: grid; grid-template-columns: 44px minmax(0, 1fr) 44px 44px; align-items: center; height: 56px; max-width: 760px; margin: 0 auto; }
+.bar-in { display: grid; grid-template-columns: 44px minmax(0, 1fr) 44px 44px 44px; align-items: center; height: 56px; max-width: 760px; margin: 0 auto; }
 .ib { width: 44px; height: 44px; display: grid; place-items: center; color: var(--ink); border-radius: 22px; }
 .ib:active { background: var(--rule); }
 .ttl { min-width: 0; padding: 0 4px; }
@@ -126,6 +126,9 @@ body.rec .fab .i-pause { display: block; }
 .jump { position: fixed; z-index: 11; left: 50%; transform: translateX(-50%); bottom: calc(92px + env(safe-area-inset-bottom, 0px)); background: var(--sheet); color: var(--ink); border: 1px solid var(--rule); border-radius: 16px; padding: 6px 14px; font-size: 13px; box-shadow: var(--shadow); }
 .toast { position: fixed; z-index: 40; left: 50%; transform: translateX(-50%); bottom: calc(96px + env(safe-area-inset-bottom, 0px)); max-width: calc(100% - 32px); background: var(--ink); color: var(--paper); padding: 8px 14px; border-radius: 18px; font-size: 14px; opacity: 0; pointer-events: none; transition: opacity .2s; }
 .toast.on { opacity: .94; }
+#pipVideo { position: fixed; left: 0; bottom: 0; width: 2px; height: 2px; opacity: 0; pointer-events: none; }
+#pipVideo:fullscreen { width: 100%; height: 100%; opacity: 1; background: #17150F; object-fit: contain; }
+body.pipon #btnPip { color: var(--accent-ink); }
 
 /* sheets */
 .scrim { position: fixed; inset: 0; z-index: 25; background: var(--scrim); }
@@ -187,6 +190,9 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
       <input class="ttl-in" id="ttlIn" type="text" maxlength="40" hidden aria-label="笔记标题">
       <div class="meta"><span class="dot" aria-hidden="true"></span><span id="metaTxt"></span></div>
     </div>
+    <button class="ib" id="btnPip" aria-label="浮窗字幕">
+      <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><rect x="12" y="11.5" width="7" height="5.5" rx="1" fill="currentColor" stroke="none"/></svg>
+    </button>
     <button class="ib" id="btnCopy" aria-label="复制全部">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>
     </button>
@@ -226,6 +232,8 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
 </div>
 <button class="jump" id="jump" hidden>↓ 有新内容</button>
 <div class="toast" id="toast" role="status"></div>
+<canvas id="pipCanvas" width="720" height="540" hidden></canvas>
+<video id="pipVideo" muted playsinline aria-hidden="true"></video>
 
 <div class="scrim" id="scrim" hidden></div>
 <section class="sheet" id="setSheet" hidden aria-label="设置">
@@ -348,6 +356,7 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     li.classList.toggle('stale', !!e.zh && e.st === 'wait');
     li.classList.toggle('err', !e.zh && e.st === 'err');
     li.classList.toggle('prov', !!e.prov);
+    if (typeof schedulePip === 'function') schedulePip();
   }
   function updateMeta() {
     const c = note.entries.length;
@@ -361,6 +370,7 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     liveSrc.textContent = src || '';
     liveZh.textContent = zh || '';
     liveZh.classList.toggle('caret', !zh);
+    if (typeof schedulePip === 'function') schedulePip();
   }
   function nearBottom() { return window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 140; }
   function follow(stick) {
@@ -383,6 +393,30 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     const out = (j && j[0] || []).map(x => (x && x[0]) || '').join('').trim();
     if (!out) throw new Error('empty');
     return out;
+  }
+  // Spoken fillers ("えっと", "um") confuse the translator ("えっと" came back as "出色地"), so they are
+  // left out of what gets translated; the original line on screen keeps them.
+  const FILLERS = {
+    ja: /(^|[\s、。,，])(?:えっと|えーっと|えーと|ええと|えー+|あのー+|あのう|あの|うーん|うーむ|そのー+|まあー+)(?=$|[\s、。,，])/g,
+    en: /(^|[\s,.])(?:um+|uh+|erm+|hmm+|uh-huh)(?=$|[\s,.])/gi
+  };
+  function forTranslate(text, lang) {
+    const re = FILLERS[lang];
+    let t = text || '';
+    if (re) { for (let k = 0; k < 3; k++) t = t.replace(re, '$1'); }
+    return t.replace(/^[\s、。,，.]+/, '').replace(/\s+/g, ' ').trim();
+  }
+  // Translate together with the sentence before it, so the translator sees what is being talked about;
+  // only the translation of the new sentence is kept.
+  async function translateWithContext(text, prev, lang, signal) {
+    if (prev) {
+      try {
+        const out = await gtx(prev + '\n' + text, (LANGS[lang] || LANGS.ja).tr, signal);
+        const parts = out.split('\n').map(x => x.trim()).filter(Boolean);
+        if (parts.length === 2 && parts[1]) { setNet(false); return parts[1]; }
+      } catch (e) { if (signal.aborted) throw e; }
+    }
+    return translate(text, lang, signal);
   }
   async function mymemory(text, sl, signal) {
     const u = 'https://api.mymemory.translated.net/get?langpair=' + sl + '|zh-CN&q=' + encodeURIComponent(text.slice(0, 450));
@@ -412,8 +446,14 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     inflight.set(e, ctl);
     e.st = 'wait'; paint(e);
     let zh = null;
-    try { zh = await translate(e.src, e.lang, ctl.signal); }
-    catch (err) { if (ctl.signal.aborted) return; }
+    const q = forTranslate(e.src, e.lang);
+    const i = note.entries.indexOf(e), pe = i > 0 ? note.entries[i - 1] : null;
+    const prev = pe && pe.lang === e.lang && e.ts - pe.ts < 120000 ? forTranslate(pe.src, pe.lang).slice(-200) : '';
+    if (!q) zh = '（嗯…）';
+    else {
+      try { zh = await translateWithContext(q, prev, e.lang, ctl.signal); }
+      catch (err) { if (ctl.signal.aborted) return; }
+    }
     if (ctl.signal.aborted) return;
     inflight.delete(e);
     if (zh) { e.zh = zh; e.st = 'ok'; } else { e.st = 'err'; setNet(true); }
@@ -512,7 +552,7 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     return t.slice(i).trim();
   }
 
-  const VERSION = 'v7';
+  const VERSION = 'v8';
 
   /* ---------- diagnostics: what the recognition service actually does ---------- */
   const dlog = [];
@@ -711,7 +751,7 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
       if (dgWs !== ws) return;
       dgWs = null;
       if (!want) { dgRelease(); if (s.ptt && ptt && ptt.releasing) pttCommit(); return; }
-      if (document.hidden) return; // reconnects when the page is visible again
+      if (document.hidden && !pipOn) return; // reconnects when the page is visible again
       if (!s.heard && Date.now() - s.t0 < 4000) {
         quickEnds++;
         lastErr = 'close ' + ev.code;
@@ -880,7 +920,7 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
       if (silentEnds % 2 === 0) { nextMode(); dl('换成模式：' + curMode().n); }
     }
     if (!want) { updateMeta(); updateLive(); if (s.ptt && ptt && ptt.releasing) pttCommit(); return; }
-    if (document.hidden) return; // resumes when the page is visible again
+    if (document.hidden && !pipOn) return; // resumes when the page is visible again
     // a session that ends within 1.5 s without hearing anything is a failed start
     quickEnds = (!s.heard && Date.now() - startedAt < 1500) ? quickEnds + 1 : 0;
     if (quickEnds >= 8) { stop(); showBanner(explainFailure()); return; }
@@ -890,7 +930,7 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     const c = ev.error;
     dl('错误：' + c + (ev.message ? ' ' + ev.message : ''));
     if (c !== 'aborted') lastErr = c;
-    if (c === 'no-speech' || c === 'aborted' || document.hidden) return;
+    if (c === 'no-speech' || c === 'aborted' || (document.hidden && !pipOn)) return;
     if (c === 'network') { setNet(true); return; }
     const msg = {
       'not-allowed': '麦克风权限被拒绝了。点地址栏左边的图标 → 权限 → 麦克风 → 允许，然后再点 ✎。',
@@ -915,7 +955,9 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
       const ctl = liveCtl = new AbortController();
       const seq = ++liveSeq;
       try {
-        const zh = await gtx(t, LANGS[cfg.lang].tr, ctl.signal);
+        const q = forTranslate(t, cfg.lang);
+        if (!q) return;
+        const zh = await gtx(q, LANGS[cfg.lang].tr, ctl.signal);
         if (seq !== liveSeq || sess !== s || s.pending || !s.interim) return;
         s.liveFor = t;
         const stick = nearBottom();
@@ -1037,6 +1079,106 @@ ul.notes li { display: flex; align-items: center; gap: 8px; border-bottom: 1px s
     hold.addEventListener('keydown', e => { if ((e.key === ' ' || e.key === 'Enter') && !e.repeat) press(e); });
     hold.addEventListener('keyup', e => { if (e.key === ' ' || e.key === 'Enter') release(e); });
   })();
+
+  /* ---------- floating caption window (picture-in-picture of a drawn canvas) ---------- */
+  const pipCanvas = $('#pipCanvas'), pipVideo = $('#pipVideo');
+  let pipOn = false, pipLoop = 0, pipStream = null, pipHintUntil = 0, pipQueued = false;
+  const PIP_FONT = 'system-ui, -apple-system, "PingFang SC", "Noto Sans CJK SC", "Noto Sans SC", "Microsoft YaHei", sans-serif';
+  function wrapText(g, text, maxW) {
+    const tokens = (text || '').match(/[A-Za-z0-9'’\-.,!?]+|\s+|[\s\S]/g) || [];
+    const lines = []; let line = '';
+    for (const tk of tokens) {
+      const tryLine = line + tk;
+      if (g.measureText(tryLine).width <= maxW || !line) { line = tryLine; continue; }
+      lines.push(line.trimEnd()); line = tk.trimStart();
+      while (g.measureText(line).width > maxW && line.length > 1) { // a single very long token
+        let cut = line.length - 1; while (cut > 1 && g.measureText(line.slice(0, cut)).width > maxW) cut--;
+        lines.push(line.slice(0, cut)); line = line.slice(cut);
+      }
+    }
+    if (line.trim()) lines.push(line.trimEnd());
+    return lines;
+  }
+  function drawPip() {
+    pipQueued = false;
+    const g = pipCanvas.getContext('2d'), W = pipCanvas.width, H = pipCanvas.height, P = 34;
+    g.fillStyle = '#17150F'; g.fillRect(0, 0, W, H);
+    const last = note.entries[note.entries.length - 1];
+    const holding = !!ptt;
+    const liveText = ptt ? combine(ptt.text, ptt.interim, cfg.lang) : (want && sess && !sess.pending ? sess.interim : '');
+    // header: number + state
+    g.textBaseline = 'top';
+    g.font = `600 26px ${PIP_FONT}`; g.fillStyle = '#E2A43A';
+    g.fillText(last ? '#' + last.n : '#–', P, P - 6);
+    g.font = `500 22px ${PIP_FONT}`; g.fillStyle = '#8E8A81';
+    const state = holding ? '● 按住中' : want ? '● 记录中' : '已暂停';
+    g.fillText(state, W - P - g.measureText(state).width, P - 4);
+    // body: the latest whole segment, as large as it fits
+    const top = P + 40, bottomReserve = liveText || Date.now() < pipHintUntil ? 70 : 20;
+    const zh = last ? (last.zh || '翻译中…') : '还没有内容';
+    const src = last ? last.src : '';
+    const areaH = H - top - bottomReserve - P / 2;
+    let size = 50, zl = [], sl = [];
+    for (; size >= 22; size -= 4) {
+      g.font = `600 ${size}px ${PIP_FONT}`; zl = wrapText(g, zh, W - 2 * P);
+      g.font = `400 ${Math.round(size * 0.56)}px ${PIP_FONT}`; sl = cfg.src ? wrapText(g, src, W - 2 * P).slice(0, 3) : [];
+      if (zl.length * size * 1.3 + (sl.length ? 14 + sl.length * size * 0.56 * 1.4 : 0) <= areaH) break;
+    }
+    const maxZl = Math.max(1, Math.floor(areaH / (size * 1.3)));
+    if (zl.length > maxZl) { zl = zl.slice(zl.length - maxZl); zl[0] = '…' + zl[0]; } // keep the end of a very long segment
+    let y = top;
+    g.font = `600 ${size}px ${PIP_FONT}`; g.fillStyle = last && last.zh ? '#F5F1E8' : '#8E8A81';
+    zl.forEach(l => { g.fillText(l, P, y); y += size * 1.3; });
+    if (sl.length && y + 14 + size * 0.56 * 1.4 <= H - bottomReserve) {
+      y += 14; g.font = `400 ${Math.round(size * 0.56)}px ${PIP_FONT}`; g.fillStyle = '#A39E93';
+      sl.forEach(l => { if (y + size * 0.56 * 1.4 <= H - bottomReserve) { g.fillText(l, P, y); y += size * 0.56 * 1.4; } });
+    }
+    // footer: what is being said right now, or a one-time hint
+    const foot = liveText ? '正在听：' + liveText : Date.now() < pipHintUntil ? '按 Home 键回到桌面，这个画面会变成浮窗' : '';
+    if (foot) {
+      g.font = `400 24px ${PIP_FONT}`; g.fillStyle = liveText ? '#C9A35B' : '#8E8A81';
+      let f = foot; while (g.measureText(f).width > W - 2 * P && f.length > 6) f = '…' + f.slice(Math.ceil(f.length * 0.1) + 1);
+      g.fillText(f, P, H - P - 26);
+    }
+  }
+  function schedulePip() { if (pipOn && !pipQueued) { pipQueued = true; requestAnimationFrame(drawPip); } }
+  function startPipLoop() {
+    clearInterval(pipLoop);
+    pipLoop = setInterval(drawPip, 400); // keeps frames flowing even when the page is in the background
+    document.body.classList.add('pipon');
+  }
+  function stopPip() {
+    pipOn = false; clearInterval(pipLoop); pipLoop = 0;
+    document.body.classList.remove('pipon');
+    try { pipVideo.pause(); } catch (e) { }
+  }
+  async function openPip() {
+    if (document.pictureInPictureElement) { try { await document.exitPictureInPicture(); } catch (e) { } stopPip(); return; }
+    if (document.fullscreenElement === pipVideo) { try { await document.exitFullscreen(); } catch (e) { } stopPip(); return; }
+    pipOn = true; drawPip(); startPipLoop();
+    try {
+      if (!pipStream) { pipStream = pipCanvas.captureStream(5); pipVideo.srcObject = pipStream; }
+      await pipVideo.play();
+    } catch (e) { dl('浮窗视频：' + (e && e.name)); }
+    if (document.pictureInPictureEnabled && pipVideo.requestPictureInPicture) {
+      try { await pipVideo.requestPictureInPicture(); dl('浮窗已打开'); toast('浮窗已打开，可以切到别的应用'); return; }
+      catch (e) { dl('浮窗：' + (e && e.name)); }
+    }
+    // Chrome on Android: a full-screen video becomes a floating window when you go to the home screen
+    try {
+      pipHintUntil = Date.now() + 8000;
+      await pipVideo.requestFullscreen({ navigationUI: 'hide' });
+      dl('浮窗：全屏方式');
+    } catch (e) {
+      stopPip(); dl('浮窗失败：' + (e && e.name));
+      toast('这个浏览器打不开浮窗');
+    }
+  }
+  pipVideo.addEventListener('leavepictureinpicture', () => { if (document.fullscreenElement !== pipVideo) stopPip(); });
+  document.addEventListener('fullscreenchange', () => {
+    if (!document.fullscreenElement && !document.pictureInPictureElement && pipOn) stopPip();
+  });
+  $('#btnPip').addEventListener('click', openPip);
 
   /* ---------- UI ---------- */
   $('#btnRec').addEventListener('click', () => { if (ptt) return; want ? stop() : start(); });
