@@ -1,0 +1,46 @@
+name: Build clicker app
+
+on:
+  push:
+    paths:
+      - 'clicker/**'
+      - '.github/workflows/clicker.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: clicker-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build APK
+        working-directory: clicker
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Publish to the "clicker-latest" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp clicker/app/build/outputs/apk/release/app-release.apk clicker.apk
+          gh release delete clicker-latest --yes --cleanup-tag || true
+          gh release create clicker-latest clicker.apk \
+            --target "${{ github.sha }}" \
+            --title "连点器（第 ${{ github.run_number }} 次构建）" \
+            --notes "在手机浏览器打开下面的 clicker.apk 下载并安装。新版本直接覆盖安装，方案和设置会保留。" \
+            --latest=false
