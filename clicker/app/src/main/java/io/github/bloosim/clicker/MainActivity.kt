@@ -44,6 +44,8 @@ class MainActivity : Activity() {
         super.onResume()
         Store.listen(onStore)
         render()
+        // right after switching the service on in the settings, it connects a moment later
+        if (ClickService.me == null) scroll.postDelayed({ if (!isFinishing) render() }, 900)
     }
 
     override fun onPause() {
@@ -112,7 +114,7 @@ class MainActivity : Activity() {
                 card.addView(Ui.text(this,
                     (if (enabled) "请到无障碍设置里把「连点器」关掉再重新打开。\n\n" else "连点器用安卓的无障碍服务模拟手指点击，不需要 root。它只在你按 ▶ 后按你设置的位置点击，不读取屏幕内容。\n\n") +
                         "打开方法：点下面的按钮 →（已下载的应用 / 已安装的服务）→ 连点器 → 打开。\n" +
-                        "如果开关是灰色、打不开：手机设置 → 应用 → 应用管理 → 连点器 → 右上角 ⋮ → 「允许受限制的设置」，再回来打开。",
+                        "如果提示「受限制的设置」、开关打不开：先在无障碍里点一次连点器（让它弹出提示），再到 手机设置 → 应用 → 应用管理 → 连点器 → 右上角 ⋮ → 「允许受限制的设置」，然后回到无障碍里打开。",
                     13f, C.MUTED).apply { setPadding(0, dp(4f), 0, dp(10f)) })
                 card.addView(Ui.button(this, "去开启无障碍服务", filled = true) {
                     try { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) } catch (_: Exception) { toast("打不开设置") }
